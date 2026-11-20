@@ -24,6 +24,7 @@ const string LISTENER_AUTOACK_QUEUE = "test/listener/autoack/queue";
 const string LISTENER_CLIENTACK_QUEUE = "test/listener/clientack/queue";
 const string LISTENER_DIRECT_TOPIC = "test/listener/direct/topic";
 const string LISTENER_NACK_QUEUE = "test/listener/nack/queue";
+const string LISTENER_AUTOACK_ERROR_QUEUE = "test/listener/autoack/error/queue";
 const string LISTENER_TX_COMMIT_QUEUE = "test/listener/tx/commit/queue";
 const string LISTENER_TX_ROLLBACK_QUEUE = "test/listener/tx/rollback/queue";
 const string LISTENER_DURABLE_TOPIC = "test/listener/durable/topic";
@@ -327,6 +328,46 @@ function testListenerNackRequeueRedelivery() returns error? {
     boolean queueEmpty = check queueIsEmpty(LISTENER_NACK_QUEUE);
     test:assertTrue(redelivered, "NACK with requeue should cause the message to be redelivered");
     test:assertTrue(queueEmpty, "After redelivery and ack the queue must be empty");
+}
+
+// ========================================
+// AUTO_ACK: onMessage error -> redelivery
+// ========================================
+final Recorder autoAckErrorRecorder = new;
+
+Service autoAckErrorService = @ServiceConfig {
+    queueName: LISTENER_AUTOACK_ERROR_QUEUE,
+    ackMode: AUTO_ACK
+} service object {
+    remote function onMessage(StringPayloadMessage message) returns error? {
+        int attempt = autoAckErrorRecorder.nextAttempt();
+        autoAckErrorRecorder.add(message.payload);
+        if attempt == 1 {
+            return error("simulated processing failure");
+        }
+    }
+};
+
+@test:Config {groups: ["listener"]}
+function testListenerAutoAckRedeliversOnError() returns error? {
+    Listener solaceListener = check new (BROKER_URL, {...connectionConfig()});
+    check solaceListener.attach(autoAckErrorService);
+    check solaceListener.'start();
+    // Let the flow/subscription become fully active before publishing, so the first message is not
+    // missed under load (a topic subscription that is not yet active does not capture the message).
+    runtime:sleep(2);
+
+    string payload = "listener-autoack-error-payload";
+    check publish({queueName: LISTENER_AUTOACK_ERROR_QUEUE}, payload, PERSISTENT);
+    waitForAttempts(autoAckErrorRecorder, 2);
+    boolean redelivered = autoAckErrorRecorder.attemptCount() >= 2;
+    // Give the auto-acknowledgement of the redelivery a moment to reach the broker before checking the queue.
+    runtime:sleep(1);
+    check solaceListener.gracefulStop();
+
+    boolean queueEmpty = check queueIsEmpty(LISTENER_AUTOACK_ERROR_QUEUE);
+    test:assertTrue(redelivered, "AUTO_ACK should not acknowledge a message whose onMessage returned an error");
+    test:assertTrue(queueEmpty, "AUTO_ACK should acknowledge the successfully processed redelivery");
 }
 
 // ========================================

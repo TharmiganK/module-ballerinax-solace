@@ -338,6 +338,21 @@ public class ListenerActions {
         }
     }
 
+    /**
+     * Applies the subscription's flow settings, then forces client acknowledgement. JCSMP's auto-ack mode acks a
+     * message as soon as {@code onReceive} returns, which happens before {@code onMessage} runs because delivery is
+     * handed off to the dispatch executor; {@link SolaceMessageListener} settles AUTO_ACK messages itself instead.
+     */
+    private static void configureListenerFlowProperties(ConsumerFlowProperties flowProps,
+                                                        ConsumerSubscriptionConfig subscriptionConfig,
+                                                        boolean isTransacted) {
+        ConsumerUtils.configureFlowProperties(flowProps, subscriptionConfig);
+        flowProps.setAckMode(JCSMPProperties.SUPPORTED_MESSAGE_ACK_CLIENT);
+        if (!isTransacted) {
+            flowProps.addRequiredSettlementOutcomes(XMLMessage.Outcome.FAILED, XMLMessage.Outcome.REJECTED);
+        }
+    }
+
     private static AttachedService createReceiver(JCSMPSession session, TransactedSession txSession,
                                                   boolean isTransacted, ConsumerSubscriptionConfig subscriptionConfig,
                                                   SolaceMessageListener messageListener)
@@ -346,10 +361,7 @@ public class ListenerActions {
             Queue queue = JCSMPFactory.onlyInstance().createQueue(queueConfig.queueName());
             ConsumerFlowProperties flowProps = new ConsumerFlowProperties();
             flowProps.setEndpoint(queue);
-            ConsumerUtils.configureFlowProperties(flowProps, queueConfig);
-            if (!isTransacted) {
-                flowProps.addRequiredSettlementOutcomes(XMLMessage.Outcome.FAILED, XMLMessage.Outcome.REJECTED);
-            }
+            configureListenerFlowProperties(flowProps, queueConfig, isTransacted);
             FlowReceiver flow = isTransacted
                     ? txSession.createFlow(messageListener, flowProps, null)
                     : session.createFlow(messageListener, flowProps, null);
@@ -366,10 +378,7 @@ public class ListenerActions {
             ConsumerFlowProperties flowProps = new ConsumerFlowProperties();
             flowProps.setEndpoint(endpoint);
             flowProps.setNewSubscription(topic);
-            ConsumerUtils.configureFlowProperties(flowProps, topicConfig);
-            if (!isTransacted) {
-                flowProps.addRequiredSettlementOutcomes(XMLMessage.Outcome.FAILED, XMLMessage.Outcome.REJECTED);
-            }
+            configureListenerFlowProperties(flowProps, topicConfig, isTransacted);
             FlowReceiver flow = isTransacted
                     ? txSession.createFlow(messageListener, flowProps, null)
                     : session.createFlow(messageListener, flowProps, null);

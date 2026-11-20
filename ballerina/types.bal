@@ -46,7 +46,13 @@ public type Destination Topic|Queue;
 
 # Acknowledgement modes for message consumption
 public enum AcknowledgementMode {
+    # For a `solace:Listener` service, the message is acknowledged after `onMessage` returns successfully. If
+    # `onMessage` returns an error or panics, the message is settled as failed and redelivered, subject to the
+    # queue's maximum redelivery count and dead message queue. A message that cannot be bound to the declared
+    # `onMessage` parameter type is rejected and moved to the dead message queue, if one is configured.
+    # For a `solace:MessageConsumer`, the message is acknowledged when it is received.
     AUTO_ACK,
+    # The message must be settled explicitly using `ack` or `nack`
     CLIENT_ACK
 }
 
