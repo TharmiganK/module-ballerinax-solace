@@ -53,6 +53,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_ATTACH_LOCK;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_AUTO_ACK;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSED;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_DESTINATION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_DESTINATION_KIND;
@@ -211,6 +212,7 @@ public class ListenerActions {
                 caller.addNativeData(NATIVE_VPN, vpn);
                 caller.addNativeData(NATIVE_DESTINATION, destinationName);
                 caller.addNativeData(NATIVE_DESTINATION_KIND, destinationKind);
+                caller.addNativeData(NATIVE_AUTO_ACK, autoAck);
 
                 SolaceMessageListener messageListener = new SolaceMessageListener(runtime, nativeService, caller,
                         autoAck, url, vpn, destinationName, destinationKind);

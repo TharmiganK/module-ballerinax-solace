@@ -153,9 +153,12 @@ final class SolaceMessageListener implements XMLMessageListener {
 
     /**
      * Settles an AUTO_ACK message that never reached {@code onMessage} because it could not be converted. Redelivery
-     * would fail the same way, so it is rejected (moved to the DMQ, if one is configured) rather than requeued.
+     * would fail the same way, so it is rejected rather than requeued. It is counted as consumed (raw size) so the
+     * consume and nack metrics stay balanced.
      */
     private void rejectUndeliverable(BytesXMLMessage message) {
+        SolaceMetricsUtil.reportConsume(url, vpn, destination, destinationKind,
+                message.getContentLength() + message.getAttachmentContentLength(), message.getRedelivered());
         if (autoAck) {
             settleAutoAck(message, XMLMessage.Outcome.REJECTED, null);
         }
@@ -163,7 +166,7 @@ final class SolaceMessageListener implements XMLMessageListener {
 
     /**
      * Settles a message in AUTO_ACK mode: {@code ACCEPTED} acks it, {@code FAILED} requeues it so the queue's
-     * redelivery count and DMQ apply, and {@code REJECTED} moves it to the DMQ (or discards it if none is configured).
+     * redelivery count and DMQ apply, and {@code REJECTED} moves it to the DMQ if it is DMQ-eligible (or discards it).
      * <p>
      * The settlement is counted like an explicit {@code caller->ack()} / {@code caller->nack()} - without it,
      * {@code acks} silently undercounts auto-ack services and {@code consumed - acks} reads as a permanent backlog. A
