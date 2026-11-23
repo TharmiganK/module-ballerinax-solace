@@ -130,7 +130,8 @@ public type TrustStore record {|
     SslStoreFormat format = JKS;
 |};
 
-# Key store configuration for client certificate authentication
+# Key store configuration. Client certificate authentication is not supported yet, so the key store is not used
+# to authenticate to the broker.
 public type KeyStore record {|
     # The URL or file path of the key store
     string location;
@@ -181,7 +182,8 @@ public type SslCipherSuite ECDHE_RSA_AES256_CBC_SHA384|ECDHE_RSA_AES256_CBC_SHA|
 public type SecureSocket record {|
     # The trust store configuration for server certificate validation
     TrustStore trustStore?;
-    # The key store configuration for client certificate authentication
+    # The key store holding a client certificate. Reserved for client certificate authentication, which is not
+    # supported yet: the key store is not loaded or validated, and the `auth` configuration is used to authenticate
     KeyStore keyStore?;
     # The list of trusted common names for certificate validation
     string[] trustedCommonNames?;
