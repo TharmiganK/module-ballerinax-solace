@@ -656,7 +656,9 @@ isolated function testConsumerReceiveWithMetadata() returns error? {
         correlationId: "test-corr-id",
         messageId: "test-app-msg-id",
         messageType: "TEST_TYPE",
-        senderId: "test-sender"
+        senderId: "test-sender",
+        senderTimestamp: 1763600000000,
+        sequenceNumber: 5000000000
     },
         {queueName: CONSUMER_METADATA_QUEUE}
     );
@@ -670,6 +672,7 @@ isolated function testConsumerReceiveWithMetadata() returns error? {
             username: BROKER_USERNAME,
             password: BROKER_PASSWORD
         },
+        generateReceiveTimestamps: true,
         subscriptionConfig: {queueName: CONSUMER_METADATA_QUEUE}
     });
 
@@ -681,6 +684,11 @@ isolated function testConsumerReceiveWithMetadata() returns error? {
         test:assertEquals(msg.messageId, "test-app-msg-id", "messageId should match");
         test:assertEquals(msg.messageType, "TEST_TYPE", "messageType should match");
         test:assertEquals(msg.senderId, "test-sender", "senderId should match");
+        test:assertEquals(msg.senderTimestamp, 1763600000000, "senderTimestamp should not be truncated");
+        test:assertEquals(msg.sequenceNumber, 5000000000, "sequenceNumber should not be truncated");
+        int? receiveTimestamp = msg.receiveTimestamp;
+        test:assertTrue(receiveTimestamp is int && receiveTimestamp > 1700000000000,
+                "receiveTimestamp should be epoch milliseconds");
         Destination? destination = msg.destination;
         test:assertTrue(destination is Queue, "destination should be the queue this message was published to");
         if destination is Queue {
