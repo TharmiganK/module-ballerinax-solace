@@ -111,11 +111,13 @@ final class SolaceMessageListener implements XMLMessageListener {
             });
             return;
         } catch (Throwable t) {
-            // The broker delivered a message the connector could not decode - a receive-side failure.
+            // The broker delivered a message the connector could not decode - a receive-side failure. Converting the
+            // same message fails the same way, so only a JVM Error (such as running out of memory) is requeued.
             submit(() -> {
                 dispatchError(CommonUtils.createError("Failed to convert message",
                         t instanceof Exception e ? e : new Exception(t)), null, ERROR_TYPE_RECEIVE);
-                settleUndelivered(message, XMLMessage.Outcome.FAILED);
+                settleUndelivered(message, t instanceof Exception ? XMLMessage.Outcome.REJECTED
+                        : XMLMessage.Outcome.FAILED);
             });
             return;
         }
@@ -152,8 +154,8 @@ final class SolaceMessageListener implements XMLMessageListener {
     }
 
     /**
-     * Settles an AUTO_ACK message that never reached {@code onMessage}: REJECTED when it cannot be bound (redelivery
-     * would fail the same way), FAILED when conversion failed for another, possibly transient, reason.
+     * Settles an AUTO_ACK message that never reached {@code onMessage}: REJECTED when converting it fails the same way
+     * every time, FAILED when a JVM error that may be transient stopped the conversion.
      */
     private void settleUndelivered(BytesXMLMessage message, XMLMessage.Outcome outcome) {
         if (autoAck) {
@@ -165,7 +167,7 @@ final class SolaceMessageListener implements XMLMessageListener {
 
     /**
      * Settles an AUTO_ACK message and counts it like {@code caller->ack()}/{@code nack()}. A failure is reported as
-     * an acknowledgement error, since it is the broker's rather than the service's.
+     * an ack or nack error, matching the outcome, since it is the broker's rather than the service's.
      */
     private void settleAutoAck(BytesXMLMessage message, XMLMessage.Outcome outcome,
                                Map<String, String> traceContext) {
