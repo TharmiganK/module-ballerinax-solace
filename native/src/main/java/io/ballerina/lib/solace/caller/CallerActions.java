@@ -69,6 +69,7 @@ public class CallerActions {
     /**
      * Acknowledge a message (CLIENT_ACK mode).
      *
+     * @param env     the Ballerina environment, used to yield the strand while waiting
      * @param caller  the Ballerina caller object
      * @param message the Ballerina message to acknowledge
      * @return null on success, BError on failure
@@ -106,6 +107,7 @@ public class CallerActions {
     /**
      * Negatively acknowledge a message (NACK).
      *
+     * @param env     the Ballerina environment, used to yield the strand while waiting
      * @param caller  the Ballerina caller object
      * @param message the Ballerina message to NACK
      * @param requeue if true, use FAILED outcome (requeue); if false, use REJECTED outcome (DMQ)
@@ -146,6 +148,7 @@ public class CallerActions {
     /**
      * Commit the current transaction. Only valid when the listener connection is transacted.
      *
+     * @param env    the Ballerina environment, used to yield the strand while waiting
      * @param caller the Ballerina caller object
      * @return null on success, BError on failure
      */
@@ -174,6 +177,7 @@ public class CallerActions {
     /**
      * Rollback the current transaction. Only valid when the listener connection is transacted.
      *
+     * @param env    the Ballerina environment, used to yield the strand while waiting
      * @param caller the Ballerina caller object
      * @return null on success, BError on failure
      */

@@ -39,11 +39,7 @@
         <Bug pattern="THROWS_METHOD_THROWS_CLAUSE_BASIC_EXCEPTION"/>
     </Match>
 
-    <!--
-        CommonUtils.StrandCancelledException carries the runtime's cancellation panic (a BError) out of a
-        caller's generic exception handler so it can be rethrown unchanged. Exposing that runtime handle
-        is the point of the class, as with Service above.
-    -->
+    <!-- StrandCancelledException exposes the runtime's cancellation panic so callers can rethrow it unchanged. -->
     <Match>
         <Class name="io.ballerina.lib.solace.common.CommonUtils$StrandCancelledException"/>
         <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>

@@ -28,6 +28,8 @@ import io.ballerina.runtime.api.values.BMap;
 import io.ballerina.runtime.api.values.BString;
 
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 
 import static io.ballerina.lib.solace.common.MessageFieldConstants.PAYLOAD_KEY;
 import static io.ballerina.lib.solace.common.MessageFieldConstants.REDELIVERED_KEY;
@@ -98,6 +100,25 @@ public class CommonUtils {
         } catch (BError panic) {
             // The task's own failures are returned above, so this is the runtime cancelling the strand.
             throw new StrandCancelledException(panic);
+        }
+    }
+
+    /**
+     * Runs a close after yielding the strand. If the strand is cancelled before the close runs, it still runs, so the
+     * session is not leaked, and the cancellation is then rethrown.
+     */
+    public static BError yieldToClose(Environment env, Supplier<BError> close) {
+        AtomicBoolean ran = new AtomicBoolean();
+        try {
+            return env.yieldAndRun(() -> {
+                ran.set(true);
+                return close.get();
+            });
+        } catch (BError panic) {
+            if (!ran.get()) {
+                close.get();
+            }
+            throw panic;
         }
     }
 

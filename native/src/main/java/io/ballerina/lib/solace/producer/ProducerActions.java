@@ -288,6 +288,10 @@ public class ProducerActions {
                     elapsedNanos);
             return null;
         } catch (CommonUtils.StrandCancelledException e) {
+            // The send may not have run, so a registered key would otherwise hold close() for its drain timeout.
+            if (tracker != null && correlationKey != null) {
+                tracker.cancel(correlationKey);
+            }
             throw e.panic();
         } catch (Exception e) {
             if (tracker != null && correlationKey != null) {
@@ -358,6 +362,7 @@ public class ProducerActions {
     /**
      * Commit the current transaction. Only valid for transacted producers (when connectionConfig.transacted = true).
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param producer the Ballerina producer object
      * @return null on success, BError on failure
      */
@@ -401,6 +406,7 @@ public class ProducerActions {
     /**
      * Rollback the current transaction. Only valid for transacted producers (when connectionConfig.transacted = true).
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param producer the Ballerina producer object
      * @return null on success, BError on failure
      */
@@ -450,7 +456,7 @@ public class ProducerActions {
      */
     public static BError close(Environment env, BObject producer) {
         SolaceTracingUtil.traceResourceInvocation(env, producer);
-        return env.yieldAndRun(() -> closeProducer(producer));
+        return CommonUtils.yieldToClose(env, () -> closeProducer(producer));
     }
 
     private static BError closeProducer(BObject producer) {

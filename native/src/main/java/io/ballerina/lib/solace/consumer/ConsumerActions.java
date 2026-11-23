@@ -269,6 +269,9 @@ public class ConsumerActions {
     }
 
     private static Object emptyReceiveResult(BObject consumer) {
+        if (Boolean.TRUE.equals(consumer.getNativeData(NATIVE_CLOSED))) {
+            return reportConsumerFailure(consumer, ERROR_TYPE_RECEIVE, "Consumer is closed");
+        }
         String errorType = flowStateErrorType(flowState(consumer));
         if (INACTIVE_FLOW_ERROR.equals(errorType)) {
             return CommonUtils.createError(errorType, "Consumer flow is inactive and cannot receive messages");
@@ -402,6 +405,7 @@ public class ConsumerActions {
     /**
      * Acknowledge a message.
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param consumer the Ballerina consumer object
      * @param message  the Ballerina message to acknowledge
      * @return null on success, BError on failure
@@ -437,6 +441,7 @@ public class ConsumerActions {
     /**
      * Negatively acknowledge a message (NACK).
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param consumer the Ballerina consumer object
      * @param message  the Ballerina message to NACK
      * @param requeue  if true, use FAILED outcome (requeue); if false, use REJECTED outcome (DMQ)
@@ -477,6 +482,7 @@ public class ConsumerActions {
     /**
      * Commit the current transaction. Only valid for transacted consumers (when connectionConfig.transacted = true).
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param consumer the Ballerina consumer object
      * @return null on success, BError on failure
      */
@@ -519,6 +525,7 @@ public class ConsumerActions {
     /**
      * Rollback the current transaction. Only valid for transacted consumers (when connectionConfig.transacted = true).
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param consumer the Ballerina consumer object
      * @return null on success, BError on failure
      */
@@ -568,7 +575,7 @@ public class ConsumerActions {
      */
     public static BError close(Environment env, BObject consumer) {
         SolaceTracingUtil.traceResourceInvocation(env, consumer);
-        return env.yieldAndRun(() -> closeConsumer(consumer));
+        return CommonUtils.yieldToClose(env, () -> closeConsumer(consumer));
     }
 
     private static BError closeConsumer(BObject consumer) {
