@@ -161,6 +161,7 @@ const string BINDING_SVC_NO_ONERROR_QUEUE = "test/binding/service/noonerror/queu
 const string BINDING_CLIENT_POSITIVE_QUEUE = "test/binding/client/positive/queue";
 const string BINDING_CLIENT_MISMATCH_STRING_QUEUE = "test/binding/client/mismatch/string/queue";
 const string BINDING_CLIENT_MISMATCH_INT_QUEUE = "test/binding/client/mismatch/int/queue";
+const string BINDING_CLIENT_ACK_MISMATCH_QUEUE = "test/binding/client/clientack/mismatch/queue";
 const string BINDING_CLIENT_MISMATCH_RECORD_QUEUE = "test/binding/client/mismatch/record/queue";
 
 // Producer round-trip data-binding queue - all cases are positive round-trips, so they share one queue.
