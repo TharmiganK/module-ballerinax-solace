@@ -249,7 +249,9 @@ isolated function testTrustedCommonNamesRejectsMismatch() returns error? {
         trustedCommonNames: ["nomatch"]
     });
     test:assertTrue(producer is Error, "A broker certificate whose CN is not trusted should be rejected");
-    if producer is MessageProducer {
+    if producer is Error {
+        test:assertTrue(producer.message().includes("no common name match"), producer.message());
+    } else {
         check producer->close();
     }
 }
@@ -270,7 +272,9 @@ isolated function testExcludedProtocolsAreApplied() returns error? {
         excludedProtocols: [TLSV1_1, TLSV1_2, TLSV1_3]
     });
     test:assertTrue(producer is Error, "Excluding every TLS version should leave no protocol to connect with");
-    if producer is MessageProducer {
+    if producer is Error {
+        test:assertTrue(producer.message().includes("Error communicating with the router"), producer.message());
+    } else {
         check producer->close();
     }
 }
@@ -296,4 +300,18 @@ isolated function testKeyStoreDoesNotReplaceAuth() returns error? {
         }
     });
     check producer->close();
+}
+
+@test:Config {groups: ["producer", "validation", "negative"]}
+isolated function testTrustedCommonNamesRejectsInvalidEntries() {
+    foreach string name in ["", "Acme, Inc", "localhost "] {
+        MessageProducer|Error producer = newTlsProducer({
+            trustStore: {location: CLIENT_TRUSTSTORE_PATH, password: CLIENT_TRUSTSTORE_PASSWORD, format: PKCS12},
+            trustedCommonNames: [name]
+        });
+        test:assertTrue(producer is Error, string `'${name}' should be rejected`);
+        if producer is Error {
+            test:assertTrue(producer.message().startsWith("Invalid trusted common name"), producer.message());
+        }
+    }
 }

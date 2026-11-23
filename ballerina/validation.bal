@@ -42,8 +42,17 @@ isolated function validateConfigurations(CommonConnectionConfiguration config) r
     SecureSocket? secureSocket = config.secureSocket;
     if secureSocket is SecureSocket {
         string[]? trustedCommonNames = secureSocket.trustedCommonNames;
-        if trustedCommonNames is string[] && trustedCommonNames.length() > 16 {
-            return error Error("Trusted common names list cannot exceed 16 entries");
+        if trustedCommonNames is string[] {
+            if trustedCommonNames.length() > 16 {
+                return error Error("Trusted common names list cannot exceed 16 entries");
+            }
+            foreach string name in trustedCommonNames {
+                // JCSMP receives the names as one comma-separated list and compares them exactly.
+                if name.trim().length() == 0 || name.includes(",") || name.trim() != name {
+                    return error Error(string `Invalid trusted common name '${name}': it must be non-empty, `
+                        + "contain no comma, and have no leading or trailing whitespace");
+                }
+            }
         }
     }
 }
