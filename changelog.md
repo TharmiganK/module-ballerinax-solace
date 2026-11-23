@@ -13,3 +13,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Changed
 
 - [Make `caller->ack()` and `caller->nack()` log a warning and do nothing in an `AUTO_ACK` service, since the listener settles the message itself after `onMessage` returns](https://github.com/ballerina-platform/ballerina-library/issues/9834)
+- [Log a warning when `secureSocket.keyStore` is set, and document that the key store is not used and the `auth` configuration authenticates, since client certificate authentication is not supported yet](https://github.com/ballerina-platform/ballerina-library/issues/9862)
