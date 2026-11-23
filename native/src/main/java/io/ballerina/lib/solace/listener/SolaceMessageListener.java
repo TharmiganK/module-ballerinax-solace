@@ -129,7 +129,12 @@ final class SolaceMessageListener implements XMLMessageListener {
         SolaceMetricsUtil.reportConsume(url, vpn, destination, destinationKind,
                 CommonUtils.getPayloadSize(ballerinaMessage), CommonUtils.isRedelivered(ballerinaMessage));
         Map<String, String> traceContext = SolaceTracingUtil.extractTraceContextHeaders(ballerinaMessage);
-        submit(() -> deliver(message, ballerinaMessage, traceContext));
+        submit(() -> {
+            // A message queued behind the in-flight one when the service stops is left for the broker to redeliver.
+            if (!(stopping && skipQueued)) {
+                deliver(message, ballerinaMessage, traceContext);
+            }
+        });
     }
 
     private void deliver(BytesXMLMessage message, BMap<BString, Object> ballerinaMessage,
@@ -243,12 +248,7 @@ final class SolaceMessageListener implements XMLMessageListener {
 
     private void submit(Runnable task) {
         try {
-            dispatcher.execute(() -> {
-                // A message queued behind the in-flight one when the service stops is left unsettled for redelivery.
-                if (!(stopping && skipQueued)) {
-                    task.run();
-                }
-            });
+            dispatcher.execute(task);
         } catch (RejectedExecutionException ignored) {
             // The listener is stopping; drop late deliveries (unsettled guaranteed messages are redelivered).
         }

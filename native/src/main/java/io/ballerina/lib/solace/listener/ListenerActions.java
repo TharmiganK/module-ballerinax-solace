@@ -52,6 +52,7 @@ import io.ballerina.runtime.api.values.BString;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_ATTACH_LOCK;
@@ -64,6 +65,7 @@ import static io.ballerina.lib.solace.common.Constants.NATIVE_RUNTIME;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_SERVICES;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_STARTED;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_STOPPED;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TRANSACTED;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_URL;
@@ -252,16 +254,24 @@ public class ListenerActions {
      * @return null on success, BError on failure
      */
     public static Object detach(Environment env, BObject listener, BObject service) {
-        AttachedService attached;
-        synchronized (attachLock(listener)) {
-            attached = servicesMap(listener).remove(service);
+        try {
+            AttachedService attached;
+            synchronized (attachLock(listener)) {
+                attached = servicesMap(listener).get(service);
+            }
+            if (attached == null) {
+                return null;
+            }
+            // Wait outside the attach lock and with the strand yielded, so onMessage can still use the listener. The
+            // service stays registered until it is closed, so attach still sees its queue or topic as taken.
+            Exception e = env.yieldAndRun(() -> CommonUtils.attemptClose(() -> attached.close(true)));
+            synchronized (attachLock(listener)) {
+                servicesMap(listener).remove(service, attached);
+            }
+            return e == null ? null : CommonUtils.createError("Failed to detach service", e);
+        } catch (RuntimeException e) {
+            return CommonUtils.createError("Failed to detach service", e);
         }
-        if (attached == null) {
-            return null;
-        }
-        // Wait outside the attach lock and with the strand yielded, so onMessage can still use the listener.
-        Exception e = env.yieldAndRun(() -> CommonUtils.attemptClose(() -> attached.close(true)));
-        return e == null ? null : CommonUtils.createError("Failed to detach service", e);
     }
 
     /**
@@ -311,13 +321,37 @@ public class ListenerActions {
 
     private static Object stop(BObject listener, boolean graceful) {
         List<AttachedService> services;
+        CompletableFuture<Void> stopped;
+        CompletableFuture<?> earlierStop = null;
         synchronized (attachLock(listener)) {
-            Map<BObject, AttachedService> attached = servicesMap(listener);
-            services = new ArrayList<>(attached.values());
-            attached.clear();
-            listener.addNativeData(NATIVE_STARTED, false);
-            listener.addNativeData(NATIVE_CLOSED, true);
+            Object running = listener.getNativeData(NATIVE_STOPPED);
+            if (running instanceof CompletableFuture<?> future) {
+                earlierStop = future;
+                stopped = null;
+                services = List.of();
+            } else {
+                stopped = new CompletableFuture<>();
+                listener.addNativeData(NATIVE_STOPPED, stopped);
+                Map<BObject, AttachedService> attached = servicesMap(listener);
+                services = new ArrayList<>(attached.values());
+                attached.clear();
+                listener.addNativeData(NATIVE_STARTED, false);
+                listener.addNativeData(NATIVE_CLOSED, true);
+            }
         }
+        if (earlierStop != null) {
+            // A later stop returns once the first one has released everything.
+            earlierStop.join();
+            return null;
+        }
+        try {
+            return releaseListener(listener, services, graceful);
+        } finally {
+            stopped.complete(null);
+        }
+    }
+
+    private static Object releaseListener(BObject listener, List<AttachedService> services, boolean graceful) {
         // The waits below run outside the attach lock, so an in-flight onMessage can still call the listener.
         Exception firstError = null;
         // Stop delivery to every service before waiting on any of them, so none keeps receiving meanwhile.

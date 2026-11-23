@@ -48,6 +48,7 @@ final class AttachedService {
     private final JCSMPSession session;
     private final SolaceMessageListener messageListener;
     private boolean started;
+    private boolean closed;
 
     private AttachedService(String subscriptionType, FlowReceiver flow, XMLMessageConsumer consumer,
                             Topic directTopic, JCSMPSession session, SolaceMessageListener messageListener) {
@@ -111,10 +112,22 @@ final class AttachedService {
      *                 the receiver
      */
     synchronized void close(boolean graceful) throws JCSMPException {
-        stop();
-        if (messageListener != null) {
-            messageListener.shutdown(graceful);
+        // A second caller (a stop racing a detach) waits on this monitor for the first close, then returns.
+        if (closed) {
+            return;
         }
+        closed = true;
+        stop();
+        try {
+            if (messageListener != null) {
+                messageListener.shutdown(graceful);
+            }
+        } finally {
+            releaseReceiver();
+        }
+    }
+
+    private void releaseReceiver() throws JCSMPException {
         if (flow != null) {
             flow.close();
         }
