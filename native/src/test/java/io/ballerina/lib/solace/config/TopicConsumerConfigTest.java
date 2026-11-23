@@ -19,9 +19,9 @@
 package io.ballerina.lib.solace.config;
 
 import io.ballerina.runtime.api.creators.ValueCreator;
+import io.ballerina.runtime.api.utils.StringUtils;
 import io.ballerina.runtime.api.values.BMap;
 import io.ballerina.runtime.api.values.BString;
-import io.ballerina.runtime.api.utils.StringUtils;
 import org.testng.annotations.Test;
 
 import java.math.BigDecimal;
@@ -45,40 +45,40 @@ public class TopicConsumerConfigTest {
      */
     private static BMap<BString, Object> baseConfig() {
         BMap<BString, Object> config = ValueCreator.createMapValue();
-        config.put(TOPIC_NAME_KEY(), TOPIC_NAME);
-        config.put(ACK_MODE_KEY(), ACK_MODE_AUTO);
-        config.put(RECONNECT_RETRY_INTERVAL_KEY(), RECONNECT_INTERVAL);
+        config.put(topicNameKey(), TOPIC_NAME);
+        config.put(ackModeKey(), ACK_MODE_AUTO);
+        config.put(reconnectRetryIntervalKey(), RECONNECT_INTERVAL);
         return config;
     }
 
-    private static BString TOPIC_NAME_KEY() {
+    private static BString topicNameKey() {
         return StringUtils.fromString("topicName");
     }
 
-    private static BString ACK_MODE_KEY() {
+    private static BString ackModeKey() {
         return StringUtils.fromString("ackMode");
     }
 
-    private static BString RECONNECT_RETRY_INTERVAL_KEY() {
+    private static BString reconnectRetryIntervalKey() {
         return StringUtils.fromString("reconnectRetryInterval");
     }
 
-    private static BString MESSAGE_SELECTOR_KEY() {
+    private static BString messageSelectorKey() {
         return StringUtils.fromString("messageSelector");
     }
 
-    private static BString DURABILITY_KEY() {
+    private static BString durabilityKey() {
         return StringUtils.fromString("durability");
     }
 
-    private static BString ENDPOINT_NAME_KEY() {
+    private static BString endpointNameKey() {
         return StringUtils.fromString("endpointName");
     }
 
     @Test
     public void testTemporaryTopicWithNonEmptySelectorThrows() {
         BMap<BString, Object> config = baseConfig();
-        config.put(MESSAGE_SELECTOR_KEY(), StringUtils.fromString("header > 10"));
+        config.put(messageSelectorKey(), StringUtils.fromString("header > 10"));
         // durability defaults to TEMPORARY
 
         try {
@@ -92,7 +92,7 @@ public class TopicConsumerConfigTest {
     @Test
     public void testTemporaryTopicWithEmptySelectorPasses() {
         BMap<BString, Object> config = baseConfig();
-        config.put(MESSAGE_SELECTOR_KEY(), StringUtils.fromString(""));
+        config.put(messageSelectorKey(), StringUtils.fromString(""));
         // durability defaults to TEMPORARY
 
         // Should not throw
@@ -112,9 +112,9 @@ public class TopicConsumerConfigTest {
     @Test
     public void testDurableTopicWithSelectorAndEndpointNamePasses() {
         BMap<BString, Object> config = baseConfig();
-        config.put(MESSAGE_SELECTOR_KEY(), StringUtils.fromString("header > 10"));
-        config.put(DURABILITY_KEY(), StringUtils.fromString("DURABLE"));
-        config.put(ENDPOINT_NAME_KEY(), StringUtils.fromString("test-endpoint"));
+        config.put(messageSelectorKey(), StringUtils.fromString("header > 10"));
+        config.put(durabilityKey(), StringUtils.fromString("DURABLE"));
+        config.put(endpointNameKey(), StringUtils.fromString("test-endpoint"));
 
         // Should not throw
         new TopicConsumerConfig(config).validate();
@@ -123,8 +123,8 @@ public class TopicConsumerConfigTest {
     @Test
     public void testDurableTopicWithSelectorMissingEndpointNameThrows() {
         BMap<BString, Object> config = baseConfig();
-        config.put(MESSAGE_SELECTOR_KEY(), StringUtils.fromString("header > 10"));
-        config.put(DURABILITY_KEY(), StringUtils.fromString("DURABLE"));
+        config.put(messageSelectorKey(), StringUtils.fromString("header > 10"));
+        config.put(durabilityKey(), StringUtils.fromString("DURABLE"));
         // endpointName missing
 
         try {
