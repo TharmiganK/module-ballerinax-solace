@@ -170,7 +170,7 @@ public class ProducerActions {
     /**
      * Send a message to the specified destination.
      *
-     * @param env            the Ballerina environment (injected for tracing)
+     * @param env            the Ballerina environment, for tracing and to yield the strand while waiting
      * @param producer       the Ballerina producer object
      * @param message        the message to send
      * @param destinationMap the destination (Topic or Queue)
@@ -184,7 +184,7 @@ public class ProducerActions {
     /**
      * Send a guaranteed message to the specified destination and wait until the broker acknowledges it.
      *
-     * @param env            the Ballerina environment (injected for tracing)
+     * @param env            the Ballerina environment, for tracing and to yield the strand while waiting
      * @param producer       the Ballerina producer object
      * @param message        the message to send
      * @param destinationMap the destination (Topic or Queue)
@@ -287,6 +287,8 @@ public class ProducerActions {
             SolaceMetricsUtil.reportPublish(producer, destinationName, destinationKind, getDeliveryMode(message), size,
                     elapsedNanos);
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             if (tracker != null && correlationKey != null) {
                 tracker.cancel(correlationKey);
@@ -323,7 +325,7 @@ public class ProducerActions {
             return CommonUtils.createError(String.format(
                     "Failed to confirm the message published to '%s'", destinationName), cause);
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            // Reported as an error; the flag is not restored because this runs on the calling strand's thread.
             tracker.cancel(awaitedPublish.key());
             return CommonUtils.createError(String.format(
                     "Interrupted while waiting for the broker to acknowledge the message published to '%s'",
@@ -388,6 +390,8 @@ public class ProducerActions {
             }
 
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportProducerError(producer, ERROR_TYPE_COMMIT);
             return CommonUtils.createError("Failed to commit transaction", e);
@@ -429,6 +433,8 @@ public class ProducerActions {
             }
 
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportProducerError(producer, ERROR_TYPE_ROLLBACK);
             return CommonUtils.createError("Failed to rollback transaction", e);
@@ -438,7 +444,7 @@ public class ProducerActions {
     /**
      * Close the producer and release resources.
      *
-     * @param env      the Ballerina environment (injected for tracing)
+     * @param env      the Ballerina environment, for tracing and to yield the strand while waiting
      * @param producer the Ballerina producer object
      * @return null on success, BError on failure
      */
@@ -448,6 +454,16 @@ public class ProducerActions {
     }
 
     private static BError closeProducer(BObject producer) {
+        // close now yields, so two strands can reach here together; only the first one closes.
+        synchronized (producer) {
+            if (Boolean.TRUE.equals(producer.getNativeData(NATIVE_CLOSED))) {
+                return null;
+            }
+            return closeProducerResources(producer);
+        }
+    }
+
+    private static BError closeProducerResources(BObject producer) {
         XMLMessageProducer xmlProducer = (XMLMessageProducer) producer.getNativeData(NATIVE_PRODUCER);
         TransactedSession txSession = (TransactedSession) producer.getNativeData(NATIVE_TX_SESSION);
         JCSMPSession session = (JCSMPSession) producer.getNativeData(NATIVE_SESSION);
@@ -461,7 +477,7 @@ public class ProducerActions {
             try {
                 drainResult = tracker.awaitSettlement(PUBLISH_ACK_DRAIN_TIMEOUT);
             } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+                // Reported as an error; the flag is not restored because this runs on the calling strand's thread.
                 firstError = e;
             }
         }

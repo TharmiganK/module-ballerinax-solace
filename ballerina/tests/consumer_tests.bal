@@ -941,25 +941,31 @@ function newConcurrencyConsumer() returns MessageConsumer|error => new (BROKER_U
 @test:Config {groups: ["consumer", "concurrency"]}
 function testWaitingReceiveDoesNotBlockOtherStrands() returns error? {
     MessageConsumer consumer = check newConcurrencyConsumer();
-    future<Message|Error?> pending = start receiveOnNonIsolatedStrand(consumer, 5);
-    runtime:sleep(0.5);
-
+    // Measured from the start of the receiving strand: while it waited without yielding, this strand's
+    // sleep could not resume until the 5 s receive timed out.
     decimal startedAt = time:monotonicNow();
-    runtime:sleep(0.2);
+    future<Message|Error?> pending = start receiveOnNonIsolatedStrand(consumer, 5);
+    runtime:sleep(0.7);
     decimal elapsed = time:monotonicNow() - startedAt;
 
-    _ = check wait pending;
+    Message|Error? received = wait pending;
     check consumer->close();
-    test:assertTrue(elapsed < 1d, string `runtime:sleep(0.2) took ${elapsed} s while receive was waiting`);
+    test:assertTrue(received is (), "The queue is empty, so receive should time out");
+    test:assertTrue(elapsed < 3d, string `runtime:sleep(0.7) took ${elapsed} s while receive was waiting`);
 }
 
 @test:Config {groups: ["consumer", "concurrency"]}
 function testCloseEndsWaitingReceive() returns error? {
     MessageConsumer consumer = check newConcurrencyConsumer();
-    future<Message|Error?> pending = start receiveOnNonIsolatedStrand(consumer, ());
+    // A finite timeout makes this fail rather than hang if close does not end the wait.
+    future<Message|Error?> pending = start receiveOnNonIsolatedStrand(consumer, 20);
     runtime:sleep(0.5);
 
-    check consumer->close();
+    decimal startedAt = time:monotonicNow();
+    Error? closed = consumer->close();
     Message|Error? result = wait pending;
+    decimal elapsed = time:monotonicNow() - startedAt;
+    test:assertTrue(closed is (), "close should succeed");
     test:assertTrue(result is Error, "close should make a waiting receive return an Error");
+    test:assertTrue(elapsed < 10d, string `receive returned ${elapsed} s after close`);
 }

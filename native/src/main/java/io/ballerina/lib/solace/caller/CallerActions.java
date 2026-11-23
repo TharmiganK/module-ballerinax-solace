@@ -95,6 +95,8 @@ public class CallerActions {
             }
             SolaceMetricsUtil.reportAck(caller);
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_ACKNOWLEDGE);
             return CommonUtils.createError("Failed to acknowledge message", e);
@@ -133,6 +135,8 @@ public class CallerActions {
             }
             SolaceMetricsUtil.reportNack(caller, requeue);
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_NACK);
             return CommonUtils.createError("Failed to NACK message", e);
@@ -159,6 +163,8 @@ public class CallerActions {
                 return bError;
             }
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_COMMIT);
             return CommonUtils.createError("Failed to commit transaction", e);
@@ -185,6 +191,8 @@ public class CallerActions {
                 return bError;
             }
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_ROLLBACK);
             return CommonUtils.createError("Failed to rollback transaction", e);

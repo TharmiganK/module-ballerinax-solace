@@ -80,24 +80,41 @@ public class CommonUtils {
      * share its lock, keep running while it waits.
      */
     public static Object executeBlocking(Environment env, RunnableWithException task) {
-        return env.yieldAndRun(() -> {
-            try {
-                task.run();
-                return null;
-            } catch (Exception e) {
-                return createError("Error during blocking operation", e);
-            }
+        return executeBlocking(env, () -> {
+            task.run();
+            return null;
         });
     }
 
     public static Object executeBlocking(Environment env, CompletableWithException task) {
-        return env.yieldAndRun(() -> {
-            try {
-                return task.run();
-            } catch (Exception e) {
-                return createError("Error during blocking operation", e);
-            }
-        });
+        try {
+            return env.yieldAndRun(() -> {
+                try {
+                    return task.run();
+                } catch (Exception e) {
+                    return createError("Error during blocking operation", e);
+                }
+            });
+        } catch (BError panic) {
+            // The task's own failures are returned above, so this is the runtime cancelling the strand.
+            throw new StrandCancelledException(panic);
+        }
+    }
+
+    /**
+     * Carries the runtime's panic out of a caller's generic exception handler, which must rethrow it.
+     */
+    public static final class StrandCancelledException extends RuntimeException {
+        private final BError panic;
+
+        StrandCancelledException(BError panic) {
+            super(panic);
+            this.panic = panic;
+        }
+
+        public BError panic() {
+            return panic;
+        }
     }
 
     /**
