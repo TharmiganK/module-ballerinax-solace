@@ -331,6 +331,43 @@ isolated function testProducerSendWithUserData() returns error? {
     check producer->close();
 }
 
+@test:Config {groups: ["producer", "send"]}
+isolated function testProducerSendWithEmptyUserData() returns error? {
+    MessageProducer producer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD}
+    });
+    check producer->sendAwaitAcknowledgement(
+        {payload: "empty-user-data-1", deliveryMode: PERSISTENT, userData: []},
+        {queueName: PRODUCER_EMPTY_USERDATA_QUEUE},
+        timeout = 10
+    );
+    check producer->send({payload: "empty-user-data-2", deliveryMode: PERSISTENT, userData: []},
+            {queueName: PRODUCER_EMPTY_USERDATA_QUEUE});
+    check producer->sendAwaitAcknowledgement(
+        {payload: "empty-user-data-3", deliveryMode: PERSISTENT},
+        {queueName: PRODUCER_EMPTY_USERDATA_QUEUE},
+        timeout = 10
+    );
+    check producer->close();
+
+    MessageConsumer consumer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+        subscriptionConfig: {queueName: PRODUCER_EMPTY_USERDATA_QUEUE}
+    });
+    string[] payloads = [];
+    foreach int i in 0 ..< 3 {
+        StringPayloadMessage? received = check consumer->receive(DEFAULT_RECEIVE_TIMEOUT);
+        if received is StringPayloadMessage {
+            payloads.push(received.payload);
+            test:assertTrue(received.userData is (), "An empty userData should be sent as absent");
+        }
+    }
+    check consumer->close();
+    test:assertEquals(payloads, ["empty-user-data-1", "empty-user-data-2", "empty-user-data-3"]);
+}
+
 @test:Config {groups: ["producer", "send", "graceful-close"]}
 isolated function testProducerCloseDrainsLargePersistentMessages() returns error? {
     byte[] payload = [];
