@@ -303,7 +303,7 @@ isolated function testKeyStoreDoesNotReplaceAuth() returns error? {
 }
 
 @test:Config {groups: ["producer", "validation", "negative"]}
-isolated function testTrustedCommonNamesRejectsInvalidEntries() {
+isolated function testTrustedCommonNamesRejectsInvalidEntries() returns error? {
     foreach string name in ["", "Acme, Inc", "localhost "] {
         MessageProducer|Error producer = newTlsProducer({
             trustStore: {location: CLIENT_TRUSTSTORE_PATH, password: CLIENT_TRUSTSTORE_PASSWORD, format: PKCS12},
@@ -312,6 +312,29 @@ isolated function testTrustedCommonNamesRejectsInvalidEntries() {
         test:assertTrue(producer is Error, string `'${name}' should be rejected`);
         if producer is Error {
             test:assertTrue(producer.message().startsWith("Invalid trusted common name"), producer.message());
+        } else {
+            check producer->close();
         }
+    }
+}
+
+@test:Config {groups: ["producer", "auth", "tls"]}
+isolated function testCipherSuitesAreApplied() returns error? {
+    // Every SslCipherSuite is a TLS 1.2 CBC suite, and the test broker accepts none of them over TLS 1.2. So TLS 1.2
+    // alone connects, and adding cipherSuites makes it fail only if the list is read and applied.
+    TrustStore trustStore = {location: CLIENT_TRUSTSTORE_PATH, password: CLIENT_TRUSTSTORE_PASSWORD, format: PKCS12};
+    MessageProducer tls12Only = check newTlsProducer({trustStore, excludedProtocols: [TLSV1_1, TLSV1_3]});
+    check tls12Only->close();
+
+    MessageProducer|Error restricted = newTlsProducer({
+        trustStore,
+        excludedProtocols: [TLSV1_1, TLSV1_3],
+        cipherSuites: [ECDHE_RSA_AES256_CBC_SHA384]
+    });
+    test:assertTrue(restricted is Error, "A cipher suite the broker does not accept should fail the handshake");
+    if restricted is Error {
+        test:assertTrue(restricted.message().includes("Error communicating with the router"), restricted.message());
+    } else {
+        check restricted->close();
     }
 }

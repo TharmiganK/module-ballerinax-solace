@@ -48,7 +48,7 @@ isolated function validateConfigurations(CommonConnectionConfiguration config) r
             }
             foreach string name in trustedCommonNames {
                 // JCSMP receives the names as one comma-separated list and compares them exactly.
-                if name.trim().length() == 0 || name.includes(",") || name.trim() != name {
+                if name.length() == 0 || name.includes(",") || name.trim() != name {
                     return error Error(string `Invalid trusted common name '${name}': it must be non-empty, `
                         + "contain no comma, and have no leading or trailing whitespace");
                 }
