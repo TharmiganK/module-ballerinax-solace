@@ -361,7 +361,7 @@ isolated function testProducerSendWithEmptyUserData() returns error? {
         StringPayloadMessage? received = check consumer->receive(DEFAULT_RECEIVE_TIMEOUT);
         if received is StringPayloadMessage {
             payloads.push(received.payload);
-            test:assertTrue(received.userData is (), "An empty userData should be sent as absent");
+            test:assertTrue(received.userData is (), "A received message should have no userData");
         }
     }
     check consumer->close();
