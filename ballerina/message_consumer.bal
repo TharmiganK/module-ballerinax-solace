@@ -69,9 +69,10 @@ public isolated client class MessageConsumer {
     # Blocks up to the specified timeout waiting for a message. Returns nil if an active flow is empty,
     # `InactiveFlowError` if the flow is inactive, or `FlowDownError` if it is down.
     #
-    # If the message cannot be bound to `T`, an `Error` is returned. For a non-transacted `CLIENT_ACK` consumer on a
-    # queue or durable topic endpoint, the message is also rejected, because it is never returned to be settled: it
-    # moves to the dead message queue if it is DMQ-eligible and the queue has one, and is discarded otherwise.
+    # If the message cannot be converted or bound to `T`, an `Error` is returned. For a non-transacted `CLIENT_ACK`
+    # consumer on a queue or durable topic endpoint, the message is also rejected, because it is never returned to be
+    # settled: it moves to the dead message queue if it is DMQ-eligible and the queue has one, and is discarded
+    # otherwise.
     #
     # + timeout - Maximum time in seconds to wait for a message. A nil or zero timeout never expires
     # + T - Optional type description of the expected message type; declare a narrowed
@@ -86,9 +87,10 @@ public isolated client class MessageConsumer {
     # Returns immediately with a message if available, or nil if no message is available.
     # This is a non-blocking operation.
     #
-    # If the message cannot be bound to `T`, an `Error` is returned. For a non-transacted `CLIENT_ACK` consumer on a
-    # queue or durable topic endpoint, the message is also rejected, because it is never returned to be settled: it
-    # moves to the dead message queue if it is DMQ-eligible and the queue has one, and is discarded otherwise.
+    # If the message cannot be converted or bound to `T`, an `Error` is returned. For a non-transacted `CLIENT_ACK`
+    # consumer on a queue or durable topic endpoint, the message is also rejected, because it is never returned to be
+    # settled: it moves to the dead message queue if it is DMQ-eligible and the queue has one, and is discarded
+    # otherwise.
     #
     # + T - Optional type description of the expected message type; declare a narrowed
     # `record {|*Message; T payload;|}` to have the payload data-bound into `T`
