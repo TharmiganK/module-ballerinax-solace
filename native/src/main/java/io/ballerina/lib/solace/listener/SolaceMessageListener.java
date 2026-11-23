@@ -77,10 +77,13 @@ final class SolaceMessageListener implements XMLMessageListener {
     private final String destination;
     private final String destinationKind;
     private final ExecutorService dispatcher;
+    private final boolean queuedRedelivered;
     private volatile boolean stopping;
+    private volatile boolean skipQueued;
 
-    SolaceMessageListener(Runtime runtime, Service nativeService, BObject caller, boolean autoAck, String url,
-                          String vpn, String destination, String destinationKind) {
+    SolaceMessageListener(Runtime runtime, Service nativeService, BObject caller, boolean autoAck,
+                          boolean queuedRedelivered, String url, String vpn, String destination,
+                          String destinationKind) {
         this.runtime = runtime;
         this.nativeService = nativeService;
         this.caller = caller;
@@ -89,6 +92,7 @@ final class SolaceMessageListener implements XMLMessageListener {
         this.vpn = vpn;
         this.destination = destination;
         this.destinationKind = destinationKind;
+        this.queuedRedelivered = queuedRedelivered;
         this.dispatcher = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "solace-listener-dispatch");
             thread.setDaemon(true);
@@ -241,7 +245,7 @@ final class SolaceMessageListener implements XMLMessageListener {
         try {
             dispatcher.execute(() -> {
                 // A message queued behind the in-flight one when the service stops is left unsettled for redelivery.
-                if (!stopping) {
+                if (!(stopping && skipQueued)) {
                     task.run();
                 }
             });
@@ -251,11 +255,11 @@ final class SolaceMessageListener implements XMLMessageListener {
     }
 
     /**
-     * Stops dispatching. Queued messages that have not started are skipped. A graceful shutdown waits, without a time
-     * limit, for the in-flight {@code onMessage} call and its settlement; otherwise it returns at once and the call
-     * finishes on its own.
+     * Stops dispatching. A graceful shutdown waits, without a time limit, for the in-flight {@code onMessage} and, when
+     * the broker would not redeliver them (direct topic, transacted session), for the queued messages too.
      */
     void shutdown(boolean graceful) {
+        skipQueued = !graceful || queuedRedelivered;
         stopping = true;
         dispatcher.shutdown();
         if (!graceful) {
@@ -268,6 +272,7 @@ final class SolaceMessageListener implements XMLMessageListener {
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting for onMessage to complete", e);
         }
     }
 }

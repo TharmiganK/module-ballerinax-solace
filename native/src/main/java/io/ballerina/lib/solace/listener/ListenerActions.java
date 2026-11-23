@@ -49,6 +49,8 @@ import io.ballerina.runtime.api.values.BMap;
 import io.ballerina.runtime.api.values.BObject;
 import io.ballerina.runtime.api.values.BString;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -214,8 +216,9 @@ public class ListenerActions {
                 caller.addNativeData(NATIVE_DESTINATION_KIND, destinationKind);
                 caller.addNativeData(NATIVE_AUTO_ACK, autoAck);
 
+                boolean queuedRedelivered = !directTopic && !isTransacted;
                 SolaceMessageListener messageListener = new SolaceMessageListener(runtime, nativeService, caller,
-                        autoAck, url, vpn, destinationName, destinationKind);
+                        autoAck, queuedRedelivered, url, vpn, destinationName, destinationKind);
 
                 AttachedService attached = createReceiver(session, txSession, isTransacted, subscriptionConfig,
                         messageListener);
@@ -243,22 +246,22 @@ public class ListenerActions {
     /**
      * Detach a service: stop and close its receiver and drop it from the listener.
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param listener the Ballerina listener object
      * @param service  the Ballerina service object
      * @return null on success, BError on failure
      */
-    public static Object detach(BObject listener, BObject service) {
-        try {
-            synchronized (attachLock(listener)) {
-                AttachedService attached = servicesMap(listener).remove(service);
-                if (attached != null) {
-                    attached.close(true);
-                }
-                return null;
-            }
-        } catch (Exception e) {
-            return CommonUtils.createError("Failed to detach service", e);
+    public static Object detach(Environment env, BObject listener, BObject service) {
+        AttachedService attached;
+        synchronized (attachLock(listener)) {
+            attached = servicesMap(listener).remove(service);
         }
+        if (attached == null) {
+            return null;
+        }
+        // Wait outside the attach lock and with the strand yielded, so onMessage can still use the listener.
+        Exception e = env.yieldAndRun(() -> CommonUtils.attemptClose(() -> attached.close(true)));
+        return e == null ? null : CommonUtils.createError("Failed to detach service", e);
     }
 
     /**
@@ -287,58 +290,62 @@ public class ListenerActions {
     /**
      * Gracefully stop the listener: pause delivery (letting in-flight processing finish) and release all resources.
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param listener the Ballerina listener object
      * @return null on success, BError on failure
      */
-    public static Object gracefulStop(BObject listener) {
-        return stop(listener, true);
+    public static Object gracefulStop(Environment env, BObject listener) {
+        return env.yieldAndRun(() -> stop(listener, true));
     }
 
     /**
      * Immediately stop the listener: release all resources without waiting for in-flight processing.
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param listener the Ballerina listener object
      * @return null on success, BError on failure
      */
-    public static Object immediateStop(BObject listener) {
-        return stop(listener, false);
+    public static Object immediateStop(Environment env, BObject listener) {
+        return env.yieldAndRun(() -> stop(listener, false));
     }
 
     private static Object stop(BObject listener, boolean graceful) {
+        List<AttachedService> services;
         synchronized (attachLock(listener)) {
-            Map<BObject, AttachedService> services = servicesMap(listener);
-            Exception firstError = null;
-            // Stop delivery to every service before waiting on any of them, so none keeps receiving meanwhile.
-            for (AttachedService attached : services.values()) {
-                Exception e = CommonUtils.attemptClose(attached::stop);
-                firstError = firstError == null ? e : firstError;
-            }
-            for (AttachedService attached : services.values()) {
-                Exception e = CommonUtils.attemptClose(() -> attached.close(graceful));
-                firstError = firstError == null ? e : firstError;
-            }
-            services.clear();
-
-            TransactedSession txSession = (TransactedSession) listener.getNativeData(NATIVE_TX_SESSION);
-            if (txSession != null) {
-                Exception e = CommonUtils.attemptClose(txSession::close);
-                firstError = firstError == null ? e : firstError;
-            }
-            JCSMPSession session = (JCSMPSession) listener.getNativeData(NATIVE_SESSION);
-            if (session != null) {
-                Exception e = CommonUtils.attemptClose(session::closeSession);
-                firstError = firstError == null ? e : firstError;
-            }
-
+            Map<BObject, AttachedService> attached = servicesMap(listener);
+            services = new ArrayList<>(attached.values());
+            attached.clear();
             listener.addNativeData(NATIVE_STARTED, false);
             listener.addNativeData(NATIVE_CLOSED, true);
-            SolaceSessionEventHandler.markDisconnected(listener);
-
-            if (firstError != null) {
-                return CommonUtils.createError("Failed to stop listener", firstError);
-            }
-            return null;
         }
+        // The waits below run outside the attach lock, so an in-flight onMessage can still call the listener.
+        Exception firstError = null;
+        // Stop delivery to every service before waiting on any of them, so none keeps receiving meanwhile.
+        for (AttachedService attached : services) {
+            Exception e = CommonUtils.attemptClose(attached::stop);
+            firstError = firstError == null ? e : firstError;
+        }
+        for (AttachedService attached : services) {
+            Exception e = CommonUtils.attemptClose(() -> attached.close(graceful));
+            firstError = firstError == null ? e : firstError;
+        }
+
+        TransactedSession txSession = (TransactedSession) listener.getNativeData(NATIVE_TX_SESSION);
+        if (txSession != null) {
+            Exception e = CommonUtils.attemptClose(txSession::close);
+            firstError = firstError == null ? e : firstError;
+        }
+        JCSMPSession session = (JCSMPSession) listener.getNativeData(NATIVE_SESSION);
+        if (session != null) {
+            Exception e = CommonUtils.attemptClose(session::closeSession);
+            firstError = firstError == null ? e : firstError;
+        }
+        SolaceSessionEventHandler.markDisconnected(listener);
+
+        if (firstError != null) {
+            return CommonUtils.createError("Failed to stop listener", firstError);
+        }
+        return null;
     }
 
     /**

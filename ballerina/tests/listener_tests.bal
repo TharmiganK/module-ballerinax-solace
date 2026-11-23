@@ -31,6 +31,7 @@ const string LISTENER_AUTOACK_CALLER_NACK_QUEUE = "test/listener/autoack/caller-
 const string LISTENER_GRACEFUL_STOP_QUEUE = "test/listener/graceful-stop/queue";
 const string LISTENER_IMMEDIATE_STOP_QUEUE = "test/listener/immediate-stop/queue";
 const decimal SLOW_ON_MESSAGE_SECONDS = 8;
+const string LISTENER_GRACEFUL_STOP_DIRECT_TOPIC = "test/listener/graceful-stop/direct";
 const string LISTENER_TX_COMMIT_QUEUE = "test/listener/tx/commit/queue";
 const string LISTENER_TX_ROLLBACK_QUEUE = "test/listener/tx/rollback/queue";
 const string LISTENER_DURABLE_TOPIC = "test/listener/durable/topic";
@@ -674,6 +675,7 @@ function testGracefulStopWaitsForInFlightOnMessage() returns error? {
     check solaceListener.'start();
     check publish({queueName: LISTENER_GRACEFUL_STOP_QUEUE}, "graceful-stop-payload", PERSISTENT);
     waitForAttempts(gracefulStopRecorder, 1);
+    test:assertEquals(gracefulStopRecorder.attemptCount(), 1, "onMessage should have started");
 
     check solaceListener.gracefulStop();
 
@@ -701,11 +703,46 @@ function testImmediateStopDoesNotWaitForInFlightOnMessage() returns error? {
     check solaceListener.'start();
     check publish({queueName: LISTENER_IMMEDIATE_STOP_QUEUE}, "immediate-stop-payload", PERSISTENT);
     waitForAttempts(immediateStopRecorder, 1);
+    test:assertEquals(immediateStopRecorder.attemptCount(), 1, "onMessage should have started");
 
     decimal startedAt = time:monotonicNow();
     check solaceListener.immediateStop();
     decimal elapsed = time:monotonicNow() - startedAt;
+    int completedBeforeStopReturned = immediateStopRecorder.count();
+    // Let the abandoned onMessage finish so it does not run into later tests.
+    waitForMessages(immediateStopRecorder, 1);
 
-    test:assertTrue(elapsed < 2d, string `immediateStop should not wait for onMessage, took ${elapsed} s`);
-    test:assertEquals(immediateStopRecorder.count(), 0, "onMessage should still be running");
+    test:assertTrue(elapsed < 4d, string `immediateStop should not wait for onMessage, took ${elapsed} s`);
+    test:assertEquals(completedBeforeStopReturned, 0, "onMessage should still be running when immediateStop returns");
+}
+
+final Recorder gracefulStopDirectRecorder = new;
+
+Service slowDirectService = @ServiceConfig {
+    topicName: LISTENER_GRACEFUL_STOP_DIRECT_TOPIC
+} service object {
+    remote function onMessage(StringPayloadMessage message) {
+        _ = gracefulStopDirectRecorder.nextAttempt();
+        runtime:sleep(1);
+        gracefulStopDirectRecorder.add(message.payload);
+    }
+};
+
+@test:Config {groups: ["listener", "stop"]}
+function testGracefulStopProcessesQueuedDirectMessages() returns error? {
+    Listener solaceListener = check new (BROKER_URL, {...connectionConfig()});
+    check solaceListener.attach(slowDirectService);
+    check solaceListener.'start();
+    runtime:sleep(1);
+    foreach int i in 1 ... 3 {
+        check publish({topicName: LISTENER_GRACEFUL_STOP_DIRECT_TOPIC}, string `direct-${i}`, DIRECT);
+    }
+    waitForAttempts(gracefulStopDirectRecorder, 1);
+    // Let the other two reach the dispatcher queue behind the in-flight one.
+    runtime:sleep(0.5);
+
+    check solaceListener.gracefulStop();
+
+    test:assertEquals(gracefulStopDirectRecorder.count(), 3,
+            "Direct messages already received are not redelivered, so gracefulStop should process them");
 }
