@@ -70,6 +70,8 @@ public final class ConfigurationUtils {
 
         // Set channel properties (timeouts, retries, compression)
         setChannelProperties(props, config);
+        // Without this, JCSMP drops a session's direct topic subscriptions when the session reconnects.
+        props.setBooleanProperty(JCSMPProperties.REAPPLY_SUBSCRIPTIONS, true);
 
         // Set authentication
         setAuthentication(props, config.auth());

@@ -19,6 +19,8 @@
 package io.ballerina.lib.solace.listener;
 
 import com.solacesystems.jcsmp.FlowReceiver;
+import com.solacesystems.jcsmp.JCSMPErrorResponseException;
+import com.solacesystems.jcsmp.JCSMPErrorResponseSubcodeEx;
 import com.solacesystems.jcsmp.JCSMPException;
 import com.solacesystems.jcsmp.JCSMPSession;
 import com.solacesystems.jcsmp.Topic;
@@ -110,10 +112,23 @@ final class AttachedService {
             flow.close();
         }
         if (consumer != null) {
-            if (directTopic != null && session != null) {
-                session.removeSubscription(directTopic);
+            try {
+                if (directTopic != null && session != null) {
+                    removeDirectSubscription();
+                }
+            } finally {
+                consumer.close();
             }
-            consumer.close();
+        }
+    }
+
+    private void removeDirectSubscription() throws JCSMPException {
+        try {
+            session.removeSubscription(directTopic);
+        } catch (JCSMPErrorResponseException e) {
+            if (e.getSubcodeEx() != JCSMPErrorResponseSubcodeEx.SUBSCRIPTION_NOT_FOUND) {
+                throw e;
+            }
         }
     }
 }
