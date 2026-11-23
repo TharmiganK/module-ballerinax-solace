@@ -252,6 +252,7 @@ create_queue "test/binding/client/positive/queue"
 create_queue "test/binding/client/mismatch/string/queue"
 create_queue "test/binding/client/mismatch/int/queue"
 create_queue "test/binding/client/clientack/mismatch/queue"
+create_queue "test/binding/client/clientack/nowait/mismatch/queue"
 create_queue "test/binding/client/mismatch/record/queue"
 create_queue "test/binding/producer/queue"
 

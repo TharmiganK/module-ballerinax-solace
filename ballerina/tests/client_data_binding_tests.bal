@@ -14,6 +14,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+import ballerina/lang.runtime;
 import ballerina/test;
 
 type ClientBindingAddress record {|
@@ -237,6 +238,35 @@ function testClientBindMismatchClientAckRejects() returns error? {
 
     // An unsettled message goes back to the queue when the consumer closes.
     MessageConsumer checker = check newBindingConsumer(BINDING_CLIENT_ACK_MISMATCH_QUEUE);
+    Message? leftover = check checker->receive(2);
+    check checker->close();
+    test:assertTrue(leftover is (), "CLIENT_ACK consumer should reject a message that cannot be bound");
+}
+
+@test:Config {groups: ["client", "databinding", "negative"]}
+function testClientBindMismatchClientAckReceiveNoWaitRejects() returns error? {
+    check publishToQueue(BINDING_CLIENT_ACK_NOWAIT_MISMATCH_QUEUE, "not-an-int");
+    MessageConsumer consumer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+        subscriptionConfig: {
+            queueName: BINDING_CLIENT_ACK_NOWAIT_MISMATCH_QUEUE,
+            ackMode: CLIENT_ACK
+        }
+    });
+    record {|*Message; int payload;|}|Error? result = ();
+    int attempts = 0;
+    while result is () && attempts < 50 {
+        result = consumer->receiveNoWait();
+        if result is () {
+            runtime:sleep(0.1);
+        }
+        attempts += 1;
+    }
+    check consumer->close();
+    test:assertTrue(result is Error, "Binding a TextMessage to 'int' should fail");
+
+    MessageConsumer checker = check newBindingConsumer(BINDING_CLIENT_ACK_NOWAIT_MISMATCH_QUEUE);
     Message? leftover = check checker->receive(2);
     check checker->close();
     test:assertTrue(leftover is (), "CLIENT_ACK consumer should reject a message that cannot be bound");

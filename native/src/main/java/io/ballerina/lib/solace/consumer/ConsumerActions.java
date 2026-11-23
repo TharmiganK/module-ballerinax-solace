@@ -54,7 +54,7 @@ import static io.ballerina.lib.solace.common.Constants.NATIVE_CONSUMER_FLOW_STAT
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CONSUMER;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_DESTINATION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_FLOW;
-import static io.ballerina.lib.solace.common.Constants.NATIVE_REJECT_UNBINDABLE;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_SETTLE_UNDELIVERED;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_SUBSCRIPTION_TYPE;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TRANSACTED;
@@ -139,7 +139,7 @@ public class ConsumerActions {
             consumer.addNativeData(NATIVE_TRANSACTED, isTransacted);
             boolean directTopic = subscriptionConfig instanceof TopicConsumerConfig topicSubscription
                     && !topicSubscription.isDurable();
-            consumer.addNativeData(NATIVE_REJECT_UNBINDABLE, !isTransacted && !directTopic
+            consumer.addNativeData(NATIVE_SETTLE_UNDELIVERED, !isTransacted && !directTopic
                     && subscriptionConfig.ackMode() == AcknowledgementMode.CLIENT_ACK);
             consumer.addNativeData(NATIVE_CLOSED, false);
             consumer.addNativeData(NATIVE_URL, url.getValue());
@@ -236,9 +236,11 @@ public class ConsumerActions {
                 try {
                     return MessageConverter.toBallerinaMessage(message, bTypedesc);
                 } catch (BallerinaSolaceDatabindingException e) {
-                    return rejectUnbindable(consumer, message, CommonUtils.createError(e.getMessage()));
+                    return settleUndelivered(consumer, message, XMLMessage.Outcome.REJECTED,
+                            CommonUtils.createError(e.getMessage()));
                 } catch (Exception e) {
-                    return CommonUtils.createError("Failed to receive message", e);
+                    return settleUndelivered(consumer, message, XMLMessage.Outcome.FAILED,
+                            CommonUtils.createError("Failed to receive message", e));
                 }
             });
 
@@ -295,6 +297,28 @@ public class ConsumerActions {
     }
 
     /**
+     * Settles a non-transacted CLIENT_ACK message that the caller never gets: REJECTED when it cannot be bound,
+     * FAILED when conversion failed for another, possibly transient, reason.
+     */
+    private static BError settleUndelivered(BObject consumer, BytesXMLMessage message, XMLMessage.Outcome outcome,
+                                            BError receiveError) {
+        if (!Boolean.TRUE.equals(consumer.getNativeData(NATIVE_SETTLE_UNDELIVERED))) {
+            return receiveError;
+        }
+        SolaceMetricsUtil.reportConsume(consumer, message.getContentLength() + message.getAttachmentContentLength(),
+                message.getRedelivered());
+        try {
+            message.settle(outcome);
+            SolaceMetricsUtil.reportNack(consumer, outcome == XMLMessage.Outcome.FAILED);
+            return receiveError;
+        } catch (Exception e) {
+            SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_NACK);
+            return CommonUtils.createError(receiveError.getErrorMessage().getValue()
+                    + "; the message could not be settled", e);
+        }
+    }
+
+    /**
      * Receive a message without waiting.
      *
      * @param env       the Ballerina environment (injected for tracing)
@@ -302,26 +326,6 @@ public class ConsumerActions {
      * @param bTypedesc the caller-declared expected message type
      * @return the received message, null if none available, or BError on failure
      */
-    /**
-     * Rejects a CLIENT_ACK message that could not be bound. The caller never gets the {@code Message}, so it cannot
-     * settle it, and redelivery would fail the same way.
-     */
-    private static BError rejectUnbindable(BObject consumer, BytesXMLMessage message, BError bindingError) {
-        if (!Boolean.TRUE.equals(consumer.getNativeData(NATIVE_REJECT_UNBINDABLE))) {
-            return bindingError;
-        }
-        SolaceMetricsUtil.reportConsume(consumer, message.getContentLength() + message.getAttachmentContentLength(),
-                message.getRedelivered());
-        try {
-            message.settle(XMLMessage.Outcome.REJECTED);
-            SolaceMetricsUtil.reportNack(consumer, false);
-            return bindingError;
-        } catch (Exception e) {
-            return CommonUtils.createError(bindingError.getErrorMessage().getValue()
-                    + "; the message could not be rejected", e);
-        }
-    }
-
     public static Object receiveNoWait(Environment env, BObject consumer, BTypedesc bTypedesc) {
         SolaceTracingUtil.traceResourceInvocation(env, consumer);
         Boolean closed = (Boolean) consumer.getNativeData(NATIVE_CLOSED);
@@ -352,9 +356,11 @@ public class ConsumerActions {
                 try {
                     return MessageConverter.toBallerinaMessage(message, bTypedesc);
                 } catch (BallerinaSolaceDatabindingException e) {
-                    return rejectUnbindable(consumer, message, CommonUtils.createError(e.getMessage()));
+                    return settleUndelivered(consumer, message, XMLMessage.Outcome.REJECTED,
+                            CommonUtils.createError(e.getMessage()));
                 } catch (Exception e) {
-                    return CommonUtils.createError("Failed to receive message", e);
+                    return settleUndelivered(consumer, message, XMLMessage.Outcome.FAILED,
+                            CommonUtils.createError("Failed to receive message", e));
                 }
             });
 
