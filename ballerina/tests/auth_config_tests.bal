@@ -235,6 +235,55 @@ isolated function testConsumerKerberosAuthIsRecognized() returns error? {
     }
 }
 
+isolated function newTlsProducer(SecureSocket secureSocket) returns MessageProducer|Error =>
+    new (BROKER_URL_TLS, {
+    messageVpn: MESSAGE_VPN,
+    auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+    secureSocket
+});
+
+@test:Config {groups: ["producer", "auth", "tls"]}
+isolated function testTrustedCommonNamesRejectsMismatch() returns error? {
+    MessageProducer|Error producer = newTlsProducer({
+        trustStore: {location: CLIENT_TRUSTSTORE_PATH, password: CLIENT_TRUSTSTORE_PASSWORD, format: PKCS12},
+        trustedCommonNames: ["nomatch"]
+    });
+    test:assertTrue(producer is Error, "A broker certificate whose CN is not trusted should be rejected");
+    if producer is MessageProducer {
+        check producer->close();
+    }
+}
+
+@test:Config {groups: ["producer", "auth", "tls"]}
+isolated function testTrustedCommonNamesAcceptsMatch() returns error? {
+    MessageProducer producer = check newTlsProducer({
+        trustStore: {location: CLIENT_TRUSTSTORE_PATH, password: CLIENT_TRUSTSTORE_PASSWORD, format: PKCS12},
+        trustedCommonNames: ["other", "localhost"]
+    });
+    check producer->close();
+}
+
+@test:Config {groups: ["producer", "auth", "tls"]}
+isolated function testExcludedProtocolsAreApplied() returns error? {
+    MessageProducer|Error producer = newTlsProducer({
+        trustStore: {location: CLIENT_TRUSTSTORE_PATH, password: CLIENT_TRUSTSTORE_PASSWORD, format: PKCS12},
+        excludedProtocols: [TLSV1_1, TLSV1_2, TLSV1_3]
+    });
+    test:assertTrue(producer is Error, "Excluding every TLS version should leave no protocol to connect with");
+    if producer is MessageProducer {
+        check producer->close();
+    }
+}
+
+@test:Config {groups: ["producer", "auth", "tls"]}
+isolated function testExcludedProtocolsAllowRemainingVersion() returns error? {
+    MessageProducer producer = check newTlsProducer({
+        trustStore: {location: CLIENT_TRUSTSTORE_PATH, password: CLIENT_TRUSTSTORE_PASSWORD, format: PKCS12},
+        excludedProtocols: [TLSV1_1, TLSV1_2]
+    });
+    check producer->close();
+}
+
 @test:Config {groups: ["producer", "auth", "tls"]}
 isolated function testKeyStoreDoesNotReplaceAuth() returns error? {
     // The key store is not used yet, so a TLS connection with one still authenticates with auth.

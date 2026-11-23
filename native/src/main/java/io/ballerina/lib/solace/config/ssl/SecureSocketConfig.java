@@ -19,12 +19,13 @@
 package io.ballerina.lib.solace.config.ssl;
 
 import io.ballerina.runtime.api.utils.StringUtils;
+import io.ballerina.runtime.api.values.BArray;
 import io.ballerina.runtime.api.values.BMap;
 import io.ballerina.runtime.api.values.BString;
 
+import java.util.ArrayList;
 import java.util.List;
 
-import static io.ballerina.lib.solace.common.CommonUtils.convertToStringArray;
 
 /**
  * SSL/TLS configuration for secure connections.
@@ -75,15 +76,24 @@ public record SecureSocketConfig(
                         new TrustStoreConfig((BMap<BString, Object>) config.getMapValue(TRUST_STORE_KEY)) : null,
                 config.containsKey(KEY_STORE_KEY) ?
                         new KeyStoreConfig((BMap<BString, Object>) config.getMapValue(KEY_STORE_KEY)) : null,
-                config.containsKey(TRUSTED_COMMON_NAMES_KEY) ?
-                        List.of(convertToStringArray(
-                                config.getArrayValue(TRUSTED_COMMON_NAMES_KEY).getValues())) : null,
-                config.containsKey(EXCLUDED_PROTOCOLS_KEY) ?
-                        List.of(convertToStringArray(config.getArrayValue(EXCLUDED_PROTOCOLS_KEY).getValues())) : null,
-                config.containsKey(CIPHER_SUITES_KEY) ?
-                        List.of(convertToStringArray(config.getArrayValue(CIPHER_SUITES_KEY).getValues())) : null
+                stringList(config, TRUSTED_COMMON_NAMES_KEY),
+                stringList(config, EXCLUDED_PROTOCOLS_KEY),
+                stringList(config, CIPHER_SUITES_KEY)
 
         );
     }
 
+    // Reads element by element: BArray.getValues() is null for a string[], and getStringArray() fails for an
+    // array of string constants such as Protocol[].
+    private static List<String> stringList(BMap<BString, Object> config, BString key) {
+        if (!config.containsKey(key)) {
+            return null;
+        }
+        BArray array = config.getArrayValue(key);
+        List<String> values = new ArrayList<>(array.size());
+        for (int i = 0; i < array.size(); i++) {
+            values.add(((BString) array.get(i)).getValue());
+        }
+        return values;
+    }
 }
