@@ -107,7 +107,7 @@ final class SolaceMessageListener implements XMLMessageListener {
             // The message could not be bound to the service's declared type - a receive-side failure.
             submit(() -> {
                 dispatchError(CommonUtils.createError(e.getMessage()), null, ERROR_TYPE_RECEIVE);
-                rejectUndeliverable(message);
+                settleUndelivered(message, XMLMessage.Outcome.REJECTED);
             });
             return;
         } catch (Throwable t) {
@@ -115,7 +115,7 @@ final class SolaceMessageListener implements XMLMessageListener {
             submit(() -> {
                 dispatchError(CommonUtils.createError("Failed to convert message",
                         t instanceof Exception e ? e : new Exception(t)), null, ERROR_TYPE_RECEIVE);
-                rejectUndeliverable(message);
+                settleUndelivered(message, XMLMessage.Outcome.FAILED);
             });
             return;
         }
@@ -152,26 +152,20 @@ final class SolaceMessageListener implements XMLMessageListener {
     }
 
     /**
-     * Settles an AUTO_ACK message that never reached {@code onMessage} because it could not be converted. Redelivery
-     * would fail the same way, so it is rejected rather than requeued. It is counted as consumed (raw size) so the
-     * consume and nack metrics stay balanced.
+     * Settles an AUTO_ACK message that never reached {@code onMessage}: REJECTED when it cannot be bound (redelivery
+     * would fail the same way), FAILED when conversion failed for another, possibly transient, reason.
      */
-    private void rejectUndeliverable(BytesXMLMessage message) {
-        SolaceMetricsUtil.reportConsume(url, vpn, destination, destinationKind,
-                message.getContentLength() + message.getAttachmentContentLength(), message.getRedelivered());
+    private void settleUndelivered(BytesXMLMessage message, XMLMessage.Outcome outcome) {
         if (autoAck) {
-            settleAutoAck(message, XMLMessage.Outcome.REJECTED, null);
+            SolaceMetricsUtil.reportConsume(url, vpn, destination, destinationKind,
+                    message.getContentLength() + message.getAttachmentContentLength(), message.getRedelivered());
+            settleAutoAck(message, outcome, null);
         }
     }
 
     /**
-     * Settles a message in AUTO_ACK mode: {@code ACCEPTED} acks it, {@code FAILED} requeues it so the queue's
-     * redelivery count and DMQ apply, and {@code REJECTED} moves it to the DMQ if it is DMQ-eligible (or discards it).
-     * <p>
-     * The settlement is counted like an explicit {@code caller->ack()} / {@code caller->nack()} - without it,
-     * {@code acks} silently undercounts auto-ack services and {@code consumed - acks} reads as a permanent backlog. A
-     * failure here is the broker's, not the service's, so it is reported as an acknowledgement error rather than a
-     * dispatch one; it is caught locally so the enclosing dispatch handler does not reclassify it.
+     * Settles an AUTO_ACK message and counts it like {@code caller->ack()}/{@code nack()}. A failure is reported as
+     * an acknowledgement error, since it is the broker's rather than the service's.
      */
     private void settleAutoAck(BytesXMLMessage message, XMLMessage.Outcome outcome,
                                Map<String, String> traceContext) {

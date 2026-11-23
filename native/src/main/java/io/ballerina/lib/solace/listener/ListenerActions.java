@@ -341,9 +341,8 @@ public class ListenerActions {
     }
 
     /**
-     * Applies the subscription's flow settings, then forces client acknowledgement. JCSMP's auto-ack mode acks a
-     * message as soon as {@code onReceive} returns, which happens before {@code onMessage} runs because delivery is
-     * handed off to the dispatch executor; {@link SolaceMessageListener} settles AUTO_ACK messages itself instead.
+     * Forces client acknowledgement: JCSMP auto-ack would ack when {@code onReceive} returns, before {@code onMessage}
+     * runs, so {@link SolaceMessageListener} settles AUTO_ACK messages itself.
      */
     private static void configureListenerFlowProperties(ConsumerFlowProperties flowProps,
                                                         ConsumerSubscriptionConfig subscriptionConfig,
