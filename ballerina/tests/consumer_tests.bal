@@ -16,6 +16,7 @@
 
 import ballerina/lang.runtime;
 import ballerina/test;
+import ballerina/time;
 
 // ========================================
 // Consumer Initialization Tests
@@ -919,4 +920,46 @@ isolated function testConsumerDefaultAckModeDoesNotRedeliver() returns error? {
     test:assertTrue(msg2 is (), "Message must not be redelivered under the default (AUTO_ACK) mode");
 
     check consumer2->close();
+}
+
+// ========================================
+// A waiting call must not hold the lock shared by non-isolated strands
+// ========================================
+int nonIsolatedReceiveCalls = 0;
+
+function receiveOnNonIsolatedStrand(MessageConsumer consumer, decimal? timeout) returns Message|Error? {
+    nonIsolatedReceiveCalls += 1;
+    return consumer->receive(timeout);
+}
+
+function newConcurrencyConsumer() returns MessageConsumer|error => new (BROKER_URL, {
+    messageVpn: MESSAGE_VPN,
+    auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+    subscriptionConfig: {queueName: CONSUMER_CONCURRENCY_QUEUE}
+});
+
+@test:Config {groups: ["consumer", "concurrency"]}
+function testWaitingReceiveDoesNotBlockOtherStrands() returns error? {
+    MessageConsumer consumer = check newConcurrencyConsumer();
+    future<Message|Error?> pending = start receiveOnNonIsolatedStrand(consumer, 5);
+    runtime:sleep(0.5);
+
+    decimal startedAt = time:monotonicNow();
+    runtime:sleep(0.2);
+    decimal elapsed = time:monotonicNow() - startedAt;
+
+    _ = check wait pending;
+    check consumer->close();
+    test:assertTrue(elapsed < 1d, string `runtime:sleep(0.2) took ${elapsed} s while receive was waiting`);
+}
+
+@test:Config {groups: ["consumer", "concurrency"]}
+function testCloseEndsWaitingReceive() returns error? {
+    MessageConsumer consumer = check newConcurrencyConsumer();
+    future<Message|Error?> pending = start receiveOnNonIsolatedStrand(consumer, ());
+    runtime:sleep(0.5);
+
+    check consumer->close();
+    Message|Error? result = wait pending;
+    test:assertTrue(result is Error, "close should make a waiting receive return an Error");
 }

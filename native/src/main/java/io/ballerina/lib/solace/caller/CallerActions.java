@@ -23,6 +23,7 @@ import com.solacesystems.jcsmp.transaction.TransactedSession;
 import io.ballerina.lib.solace.common.CommonUtils;
 import io.ballerina.lib.solace.consumer.MessageConverter;
 import io.ballerina.lib.solace.observability.SolaceMetricsUtil;
+import io.ballerina.runtime.api.Environment;
 import io.ballerina.runtime.api.values.BError;
 import io.ballerina.runtime.api.values.BMap;
 import io.ballerina.runtime.api.values.BObject;
@@ -72,7 +73,7 @@ public class CallerActions {
      * @param message the Ballerina message to acknowledge
      * @return null on success, BError on failure
      */
-    public static BError ack(BObject caller, BMap<BString, Object> message) {
+    public static BError ack(Environment env, BObject caller, BMap<BString, Object> message) {
         if (isTransacted(caller)) {
             LOGGER.warning(String.format(TRANSACTED_SETTLE_WARNING, "ack()"));
             return null;
@@ -87,7 +88,7 @@ public class CallerActions {
                 return reportConsumerFailure(caller, ERROR_TYPE_ACKNOWLEDGE,
                         "Cannot acknowledge: native message not found");
             }
-            Object result = CommonUtils.executeBlocking(nativeMessage::ackMessage);
+            Object result = CommonUtils.executeBlocking(env, nativeMessage::ackMessage);
             if (result instanceof BError bError) {
                 SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_ACKNOWLEDGE);
                 return bError;
@@ -108,7 +109,7 @@ public class CallerActions {
      * @param requeue if true, use FAILED outcome (requeue); if false, use REJECTED outcome (DMQ)
      * @return null on success, BError on failure
      */
-    public static BError nack(BObject caller, BMap<BString, Object> message, boolean requeue) {
+    public static BError nack(Environment env, BObject caller, BMap<BString, Object> message, boolean requeue) {
         if (isTransacted(caller)) {
             return reportConsumerFailure(caller, ERROR_TYPE_NACK, TRANSACTED_NACK_ERROR);
         }
@@ -121,7 +122,7 @@ public class CallerActions {
             if (nativeMessage == null) {
                 return reportConsumerFailure(caller, ERROR_TYPE_NACK, "Cannot NACK: native message not found");
             }
-            Object result = CommonUtils.executeBlocking(() -> {
+            Object result = CommonUtils.executeBlocking(env, () -> {
                 XMLMessage.Outcome outcome = requeue ? XMLMessage.Outcome.FAILED : XMLMessage.Outcome.REJECTED;
                 nativeMessage.settle(outcome);
                 return null;
@@ -144,7 +145,7 @@ public class CallerActions {
      * @param caller the Ballerina caller object
      * @return null on success, BError on failure
      */
-    public static BError commit(BObject caller) {
+    public static BError commit(Environment env, BObject caller) {
         TransactedSession txSession = (TransactedSession) caller.getNativeData(NATIVE_TX_SESSION);
         if (txSession == null) {
             return reportConsumerFailure(caller, ERROR_TYPE_COMMIT,
@@ -152,7 +153,7 @@ public class CallerActions {
                             + "Set transacted = true on the listener configuration to enable transactions.");
         }
         try {
-            Object result = CommonUtils.executeBlocking(txSession::commit);
+            Object result = CommonUtils.executeBlocking(env, txSession::commit);
             if (result instanceof BError bError) {
                 SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_COMMIT);
                 return bError;
@@ -170,7 +171,7 @@ public class CallerActions {
      * @param caller the Ballerina caller object
      * @return null on success, BError on failure
      */
-    public static BError rollback(BObject caller) {
+    public static BError rollback(Environment env, BObject caller) {
         TransactedSession txSession = (TransactedSession) caller.getNativeData(NATIVE_TX_SESSION);
         if (txSession == null) {
             return reportConsumerFailure(caller, ERROR_TYPE_ROLLBACK,
@@ -178,7 +179,7 @@ public class CallerActions {
                             + "Set transacted = true on the listener configuration to enable transactions.");
         }
         try {
-            Object result = CommonUtils.executeBlocking(txSession::rollback);
+            Object result = CommonUtils.executeBlocking(env, txSession::rollback);
             if (result instanceof BError bError) {
                 SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_ROLLBACK);
                 return bError;

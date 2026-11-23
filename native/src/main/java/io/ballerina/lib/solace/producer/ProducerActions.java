@@ -258,7 +258,7 @@ public class ProducerActions {
             final com.solacesystems.jcsmp.Destination finalDestination = jcsmpDestination;
             final Long finalCorrelationKey = correlationKey;
             long startNanos = System.nanoTime();
-            Object result = CommonUtils.executeBlocking(() -> {
+            Object result = CommonUtils.executeBlocking(env, () -> {
                 xmlProducer.send(finalMessage, finalDestination);
             });
 
@@ -273,7 +273,7 @@ public class ProducerActions {
             if (awaitedPublish != null) {
                 final PublishAcknowledgementTracker finalTracker = tracker;
                 final PublishAcknowledgementTracker.AwaitedPublish finalAwaitedPublish = awaitedPublish;
-                Object acknowledgementResult = CommonUtils.executeBlocking(() -> awaitAcknowledgement(
+                Object acknowledgementResult = CommonUtils.executeBlocking(env, () -> awaitAcknowledgement(
                         finalTracker, finalAwaitedPublish, acknowledgementTimeout, destinationName));
                 if (acknowledgementResult instanceof BError acknowledgementError) {
                     SolaceMetricsUtil.reportProducerError(producer, destinationName, destinationKind,
@@ -359,7 +359,7 @@ public class ProducerActions {
      * @param producer the Ballerina producer object
      * @return null on success, BError on failure
      */
-    public static BError commit(BObject producer) {
+    public static BError commit(Environment env, BObject producer) {
         try {
             Boolean transacted = (Boolean) producer.getNativeData(NATIVE_TRANSACTED);
             if (transacted == null || !transacted) {
@@ -380,7 +380,7 @@ public class ProducerActions {
             }
 
             // Commit transaction on TransactedSession (blocking operation)
-            Object result = CommonUtils.executeBlocking(txSession::commit);
+            Object result = CommonUtils.executeBlocking(env, txSession::commit);
 
             if (result instanceof BError) {
                 SolaceMetricsUtil.reportProducerError(producer, ERROR_TYPE_COMMIT);
@@ -400,7 +400,7 @@ public class ProducerActions {
      * @param producer the Ballerina producer object
      * @return null on success, BError on failure
      */
-    public static BError rollback(BObject producer) {
+    public static BError rollback(Environment env, BObject producer) {
         try {
             Boolean transacted = (Boolean) producer.getNativeData(NATIVE_TRANSACTED);
             if (transacted == null || !transacted) {
@@ -421,7 +421,7 @@ public class ProducerActions {
             }
 
             // Rollback transaction on TransactedSession (blocking operation)
-            Object result = CommonUtils.executeBlocking(txSession::rollback);
+            Object result = CommonUtils.executeBlocking(env, txSession::rollback);
 
             if (result instanceof BError) {
                 SolaceMetricsUtil.reportProducerError(producer, ERROR_TYPE_ROLLBACK);
@@ -444,6 +444,10 @@ public class ProducerActions {
      */
     public static BError close(Environment env, BObject producer) {
         SolaceTracingUtil.traceResourceInvocation(env, producer);
+        return env.yieldAndRun(() -> closeProducer(producer));
+    }
+
+    private static BError closeProducer(BObject producer) {
         XMLMessageProducer xmlProducer = (XMLMessageProducer) producer.getNativeData(NATIVE_PRODUCER);
         TransactedSession txSession = (TransactedSession) producer.getNativeData(NATIVE_TX_SESSION);
         JCSMPSession session = (JCSMPSession) producer.getNativeData(NATIVE_SESSION);

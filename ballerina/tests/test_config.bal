@@ -93,6 +93,7 @@ const string CONSUMER_METADATA_QUEUE = "test/consumer/metadata/queue";
 const string CONSUMER_EXPIRATION_QUEUE = "test/consumer/expiration/queue";
 const string CONSUMER_TIMEOUT_QUEUE = "test/consumer/timeout/queue";
 const string CONSUMER_NOWAIT_QUEUE = "test/consumer/nowait/queue";
+const string CONSUMER_CONCURRENCY_QUEUE = "test/consumer/concurrency/queue";
 const string CONSUMER_SELECTOR_QUEUE = "test/consumer/selector/queue";
 const string CONSUMER_MULTIPLE_QUEUE = "test/consumer/multiple/queue";
 const string CONSUMER_FLOW_QUEUE = "test/consumer/flow/queue";

@@ -19,6 +19,7 @@
 package io.ballerina.lib.solace.common;
 
 import io.ballerina.lib.solace.ModuleUtils;
+import io.ballerina.runtime.api.Environment;
 import io.ballerina.runtime.api.creators.ErrorCreator;
 import io.ballerina.runtime.api.utils.StringUtils;
 import io.ballerina.runtime.api.values.BArray;
@@ -27,7 +28,6 @@ import io.ballerina.runtime.api.values.BMap;
 import io.ballerina.runtime.api.values.BString;
 
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.CompletableFuture;
 
 import static io.ballerina.lib.solace.common.MessageFieldConstants.PAYLOAD_KEY;
 import static io.ballerina.lib.solace.common.MessageFieldConstants.REDELIVERED_KEY;
@@ -76,34 +76,28 @@ public class CommonUtils {
     }
 
     /**
-     * Executes a blocking operation on a virtual thread and waits for completion.
+     * Runs a blocking operation after yielding the calling strand, so other strands, including non-isolated ones that
+     * share its lock, keep running while it waits.
      */
-    public static Object executeBlocking(RunnableWithException task) throws Exception {
-        CompletableFuture<Object> future = new CompletableFuture<>();
-
-        Thread.startVirtualThread(() -> {
+    public static Object executeBlocking(Environment env, RunnableWithException task) {
+        return env.yieldAndRun(() -> {
             try {
                 task.run();
-                future.complete(null);
+                return null;
             } catch (Exception e) {
-                future.complete(createError("Error during blocking operation", e));
+                return createError("Error during blocking operation", e);
             }
         });
-
-        return future.get();
     }
 
-    public static Object executeBlocking(CompletableWithException task) throws Exception {
-        CompletableFuture<Object> future = new CompletableFuture<>();
-        Thread.startVirtualThread(() -> {
+    public static Object executeBlocking(Environment env, CompletableWithException task) {
+        return env.yieldAndRun(() -> {
             try {
-                Object result = task.run();
-                future.complete(result);
+                return task.run();
             } catch (Exception e) {
-                future.complete(createError("Error during blocking operation", e));
+                return createError("Error during blocking operation", e);
             }
         });
-        return future.get();
     }
 
     /**

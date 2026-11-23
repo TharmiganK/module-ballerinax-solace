@@ -210,7 +210,7 @@ public class ConsumerActions {
         String subscriptionType = (String) consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE);
 
         try {
-            Object result = CommonUtils.executeBlocking(() -> {
+            Object result = CommonUtils.executeBlocking(env, () -> {
                 BytesXMLMessage message = null;
                 if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
                         SUBSCRIPTION_TYPE_DURABLE_TOPIC.equals(subscriptionType)) {
@@ -336,7 +336,7 @@ public class ConsumerActions {
         }
         String subscriptionType = (String) consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE);
         try {
-            Object result = CommonUtils.executeBlocking(() -> {
+            Object result = CommonUtils.executeBlocking(env, () -> {
                 BytesXMLMessage message = null;
                 if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
                         SUBSCRIPTION_TYPE_DURABLE_TOPIC.equals(subscriptionType)) {
@@ -401,7 +401,7 @@ public class ConsumerActions {
      * @param message  the Ballerina message to acknowledge
      * @return null on success, BError on failure
      */
-    public static BError acknowledge(BObject consumer, BMap<BString, Object> message) {
+    public static BError acknowledge(Environment env, BObject consumer, BMap<BString, Object> message) {
         try {
             Boolean closed = (Boolean) consumer.getNativeData(NATIVE_CLOSED);
             if (closed != null && closed) {
@@ -414,7 +414,7 @@ public class ConsumerActions {
                         "Cannot acknowledge: native message not found");
             }
 
-            Object result = CommonUtils.executeBlocking(nativeMessage::ackMessage);
+            Object result = CommonUtils.executeBlocking(env, nativeMessage::ackMessage);
             if (result instanceof BError) {
                 SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_ACKNOWLEDGE);
                 return (BError) result;
@@ -435,7 +435,7 @@ public class ConsumerActions {
      * @param requeue  if true, use FAILED outcome (requeue); if false, use REJECTED outcome (DMQ)
      * @return null on success, BError on failure
      */
-    public static BError nack(BObject consumer, BMap<BString, Object> message, boolean requeue) {
+    public static BError nack(Environment env, BObject consumer, BMap<BString, Object> message, boolean requeue) {
         try {
             Boolean closed = (Boolean) consumer.getNativeData(NATIVE_CLOSED);
             if (closed != null && closed) {
@@ -448,7 +448,7 @@ public class ConsumerActions {
             }
 
             // Use settle() with appropriate outcome
-            Object result = CommonUtils.executeBlocking(() -> {
+            Object result = CommonUtils.executeBlocking(env, () -> {
                 XMLMessage.Outcome outcome = requeue ? XMLMessage.Outcome.FAILED : XMLMessage.Outcome.REJECTED;
                 nativeMessage.settle(outcome);
                 return null;
@@ -471,7 +471,7 @@ public class ConsumerActions {
      * @param consumer the Ballerina consumer object
      * @return null on success, BError on failure
      */
-    public static BError commit(BObject consumer) {
+    public static BError commit(Environment env, BObject consumer) {
         try {
             Boolean closed = (Boolean) consumer.getNativeData(NATIVE_CLOSED);
             if (closed != null && closed) {
@@ -491,7 +491,7 @@ public class ConsumerActions {
             }
 
             // Commit transaction on TransactedSession (blocking operation)
-            Object result = CommonUtils.executeBlocking(txSession::commit);
+            Object result = CommonUtils.executeBlocking(env, txSession::commit);
 
             if (result instanceof BError) {
                 SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_COMMIT);
@@ -511,7 +511,7 @@ public class ConsumerActions {
      * @param consumer the Ballerina consumer object
      * @return null on success, BError on failure
      */
-    public static BError rollback(BObject consumer) {
+    public static BError rollback(Environment env, BObject consumer) {
         try {
             Boolean closed = (Boolean) consumer.getNativeData(NATIVE_CLOSED);
             if (closed != null && closed) {
@@ -531,7 +531,7 @@ public class ConsumerActions {
             }
 
             // Rollback transaction on TransactedSession (blocking operation)
-            Object result = CommonUtils.executeBlocking(txSession::rollback);
+            Object result = CommonUtils.executeBlocking(env, txSession::rollback);
 
             if (result instanceof BError) {
                 SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_ROLLBACK);
@@ -555,6 +555,10 @@ public class ConsumerActions {
      */
     public static BError close(Environment env, BObject consumer) {
         SolaceTracingUtil.traceResourceInvocation(env, consumer);
+        return env.yieldAndRun(() -> closeConsumer(consumer));
+    }
+
+    private static BError closeConsumer(BObject consumer) {
         String subscriptionType = (String) consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE);
         FlowReceiver flowReceiver = (FlowReceiver) consumer.getNativeData(NATIVE_FLOW);
         XMLMessageConsumer xmlConsumer = (XMLMessageConsumer) consumer.getNativeData(NATIVE_CONSUMER);
