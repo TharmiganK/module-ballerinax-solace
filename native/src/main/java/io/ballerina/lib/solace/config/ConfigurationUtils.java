@@ -188,8 +188,9 @@ public final class ConfigurationUtils {
 
         // JCSMP loads the key store only under the client certificate auth scheme, which cannot be selected yet.
         if (secureSocket.keyStore() != null) {
-            LOGGER.warning("secureSocket.keyStore is ignored: client certificate authentication is not supported yet, "
-                    + "so the auth configuration is used to authenticate.");
+            LOGGER.warning("secureSocket.keyStore has no effect for " + props.getStringProperty(JCSMPProperties.HOST)
+                    + ": client certificate authentication is not supported yet, so the auth configuration is used "
+                    + "to authenticate.");
             KeyStoreConfig keyStore = secureSocket.keyStore();
             props.setProperty(JCSMPProperties.SSL_KEY_STORE, keyStore.location());
             props.setProperty(JCSMPProperties.SSL_KEY_STORE_PASSWORD, keyStore.password());
