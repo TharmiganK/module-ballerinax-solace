@@ -160,6 +160,7 @@ const string BINDING_VALIDATION_QUEUE = "test/binding/validation/queue";
 const string BINDING_SVC_POSITIVE_QUEUE = "test/binding/service/positive/queue";
 const string BINDING_SVC_MISMATCH_STRING_QUEUE = "test/binding/service/mismatch/string/queue";
 const string BINDING_SVC_MISMATCH_INT_QUEUE = "test/binding/service/mismatch/int/queue";
+const string BINDING_SVC_CLIENT_ACK_MISMATCH_QUEUE = "test/binding/service/clientack/mismatch/queue";
 const string BINDING_SVC_MISMATCH_RECORD_QUEUE = "test/binding/service/mismatch/record/queue";
 const string BINDING_SVC_NO_ONERROR_QUEUE = "test/binding/service/noonerror/queue";
 

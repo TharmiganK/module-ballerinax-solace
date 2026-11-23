@@ -223,9 +223,9 @@ public class ListenerActions {
                 caller.addNativeData(NATIVE_DESTINATION_KIND, destinationKind);
                 caller.addNativeData(NATIVE_AUTO_ACK, autoAck);
 
-                boolean queuedRedelivered = !directTopic && !isTransacted;
+                boolean nonTransactedFlow = !directTopic && !isTransacted;
                 SolaceMessageListener messageListener = new SolaceMessageListener(runtime, nativeService, caller,
-                        autoAck, queuedRedelivered, url, vpn, destinationName, destinationKind);
+                        autoAck, nonTransactedFlow, url, vpn, destinationName, destinationKind);
 
                 AttachedService attached = createReceiver(session, txSession, isTransacted, subscriptionConfig,
                         messageListener);

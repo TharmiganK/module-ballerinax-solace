@@ -57,7 +57,11 @@ public enum AcknowledgementMode {
     # topic subscription are neither acknowledged nor redelivered.
     # For a `solace:MessageConsumer`, the message is acknowledged when it is received.
     AUTO_ACK,
-    # The message must be settled explicitly using `ack` or `nack`
+    # The message must be settled explicitly using `ack` or `nack`. For a `solace:Listener` service on a queue or
+    # durable topic endpoint of a non-transacted listener, a message that cannot be converted or bound to the declared
+    # `onMessage` parameter type is rejected, because the service never receives it to settle: it moves to the queue's
+    # dead message queue only if it is DMQ-eligible, and the broker discards it otherwise. On a transacted listener it
+    # stays in the transaction and is settled by the next `commit` or `rollback`.
     CLIENT_ACK
 }
 
