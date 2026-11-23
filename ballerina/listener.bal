@@ -104,7 +104,8 @@ public isolated class Listener {
     # Gracefully stop the listener.
     #
     # Stops delivery to attached services and waits for in-flight message processing to complete
-    # before closing resources.
+    # before closing resources. Guaranteed messages that were received but not yet passed to `onMessage`
+    # are left unsettled, so the broker redelivers them.
     #
     # + return - Error if stop fails
     public isolated function gracefulStop() returns Error? = @java:Method {

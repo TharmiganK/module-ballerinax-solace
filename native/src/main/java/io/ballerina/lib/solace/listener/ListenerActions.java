@@ -226,7 +226,7 @@ public class ListenerActions {
                     try {
                         attached.start();
                     } catch (Exception e) {
-                        CommonUtils.closeQuietly(attached::close);
+                        CommonUtils.closeQuietly(() -> attached.close(false));
                         throw e;
                     }
                 }
@@ -252,7 +252,7 @@ public class ListenerActions {
             synchronized (attachLock(listener)) {
                 AttachedService attached = servicesMap(listener).remove(service);
                 if (attached != null) {
-                    attached.close();
+                    attached.close(true);
                 }
                 return null;
             }
@@ -308,12 +308,13 @@ public class ListenerActions {
         synchronized (attachLock(listener)) {
             Map<BObject, AttachedService> services = servicesMap(listener);
             Exception firstError = null;
+            // Stop delivery to every service before waiting on any of them, so none keeps receiving meanwhile.
             for (AttachedService attached : services.values()) {
-                if (graceful) {
-                    Exception e = CommonUtils.attemptClose(attached::stop);
-                    firstError = firstError == null ? e : firstError;
-                }
-                Exception e = CommonUtils.attemptClose(attached::close);
+                Exception e = CommonUtils.attemptClose(attached::stop);
+                firstError = firstError == null ? e : firstError;
+            }
+            for (AttachedService attached : services.values()) {
+                Exception e = CommonUtils.attemptClose(() -> attached.close(graceful));
                 firstError = firstError == null ? e : firstError;
             }
             services.clear();

@@ -77,6 +77,7 @@ final class SolaceMessageListener implements XMLMessageListener {
     private final String destination;
     private final String destinationKind;
     private final ExecutorService dispatcher;
+    private volatile boolean stopping;
 
     SolaceMessageListener(Runtime runtime, Service nativeService, BObject caller, boolean autoAck, String url,
                           String vpn, String destination, String destinationKind) {
@@ -238,23 +239,34 @@ final class SolaceMessageListener implements XMLMessageListener {
 
     private void submit(Runnable task) {
         try {
-            dispatcher.execute(task);
+            dispatcher.execute(() -> {
+                // A message queued behind the in-flight one when the service stops is left unsettled for redelivery.
+                if (!stopping) {
+                    task.run();
+                }
+            });
         } catch (RejectedExecutionException ignored) {
             // The listener is stopping; drop late deliveries (unsettled guaranteed messages are redelivered).
         }
     }
 
     /**
-     * Stops the dispatch executor. Called when the service is detached or the listener is stopped.
+     * Stops dispatching. Queued messages that have not started are skipped. A graceful shutdown waits, without a time
+     * limit, for the in-flight {@code onMessage} call and its settlement; otherwise it returns at once and the call
+     * finishes on its own.
      */
-    void shutdown() {
+    void shutdown(boolean graceful) {
+        stopping = true;
         dispatcher.shutdown();
+        if (!graceful) {
+            return;
+        }
         try {
-            if (!dispatcher.awaitTermination(5, TimeUnit.SECONDS)) {
-                dispatcher.shutdownNow();
+            boolean terminated = false;
+            while (!terminated) {
+                terminated = dispatcher.awaitTermination(1, TimeUnit.MINUTES);
             }
         } catch (InterruptedException e) {
-            dispatcher.shutdownNow();
             Thread.currentThread().interrupt();
         }
     }

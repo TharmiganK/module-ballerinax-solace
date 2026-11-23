@@ -16,6 +16,7 @@
 
 import ballerina/lang.runtime;
 import ballerina/test;
+import ballerina/time;
 
 // ========================================
 // Listener test destinations
@@ -27,6 +28,9 @@ const string LISTENER_NACK_QUEUE = "test/listener/nack/queue";
 const string LISTENER_AUTOACK_ERROR_QUEUE = "test/listener/autoack/error/queue";
 const string LISTENER_AUTOACK_PANIC_QUEUE = "test/listener/autoack/panic/queue";
 const string LISTENER_AUTOACK_CALLER_NACK_QUEUE = "test/listener/autoack/caller-nack/queue";
+const string LISTENER_GRACEFUL_STOP_QUEUE = "test/listener/graceful-stop/queue";
+const string LISTENER_IMMEDIATE_STOP_QUEUE = "test/listener/immediate-stop/queue";
+const decimal SLOW_ON_MESSAGE_SECONDS = 8;
 const string LISTENER_TX_COMMIT_QUEUE = "test/listener/tx/commit/queue";
 const string LISTENER_TX_ROLLBACK_QUEUE = "test/listener/tx/rollback/queue";
 const string LISTENER_DURABLE_TOPIC = "test/listener/durable/topic";
@@ -646,4 +650,62 @@ function testListenerAllowsReattachAfterDetach() returns error? {
     check solaceListener.gracefulStop();
 
     test:assertTrue(received, "The re-attached service should receive the message after being detached and re-attached");
+}
+
+// ========================================
+// gracefulStop waits for in-flight onMessage; immediateStop does not
+// ========================================
+final Recorder gracefulStopRecorder = new;
+
+Service slowGracefulService = @ServiceConfig {
+    queueName: LISTENER_GRACEFUL_STOP_QUEUE
+} service object {
+    remote function onMessage(StringPayloadMessage message) {
+        _ = gracefulStopRecorder.nextAttempt();
+        runtime:sleep(SLOW_ON_MESSAGE_SECONDS);
+        gracefulStopRecorder.add(message.payload);
+    }
+};
+
+@test:Config {groups: ["listener", "stop"]}
+function testGracefulStopWaitsForInFlightOnMessage() returns error? {
+    Listener solaceListener = check new (BROKER_URL, {...connectionConfig()});
+    check solaceListener.attach(slowGracefulService);
+    check solaceListener.'start();
+    check publish({queueName: LISTENER_GRACEFUL_STOP_QUEUE}, "graceful-stop-payload", PERSISTENT);
+    waitForAttempts(gracefulStopRecorder, 1);
+
+    check solaceListener.gracefulStop();
+
+    test:assertEquals(gracefulStopRecorder.count(), 1, "gracefulStop should return after onMessage completes");
+    boolean queueEmpty = check queueIsEmpty(LISTENER_GRACEFUL_STOP_QUEUE);
+    test:assertTrue(queueEmpty, "The in-flight message should be acknowledged before the flow closes");
+}
+
+final Recorder immediateStopRecorder = new;
+
+Service slowImmediateService = @ServiceConfig {
+    queueName: LISTENER_IMMEDIATE_STOP_QUEUE
+} service object {
+    remote function onMessage(StringPayloadMessage message) {
+        _ = immediateStopRecorder.nextAttempt();
+        runtime:sleep(SLOW_ON_MESSAGE_SECONDS);
+        immediateStopRecorder.add(message.payload);
+    }
+};
+
+@test:Config {groups: ["listener", "stop"]}
+function testImmediateStopDoesNotWaitForInFlightOnMessage() returns error? {
+    Listener solaceListener = check new (BROKER_URL, {...connectionConfig()});
+    check solaceListener.attach(slowImmediateService);
+    check solaceListener.'start();
+    check publish({queueName: LISTENER_IMMEDIATE_STOP_QUEUE}, "immediate-stop-payload", PERSISTENT);
+    waitForAttempts(immediateStopRecorder, 1);
+
+    decimal startedAt = time:monotonicNow();
+    check solaceListener.immediateStop();
+    decimal elapsed = time:monotonicNow() - startedAt;
+
+    test:assertTrue(elapsed < 2d, string `immediateStop should not wait for onMessage, took ${elapsed} s`);
+    test:assertEquals(immediateStopRecorder.count(), 0, "onMessage should still be running");
 }

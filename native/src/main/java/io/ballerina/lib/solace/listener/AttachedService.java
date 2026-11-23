@@ -106,13 +106,14 @@ final class AttachedService {
 
     /**
      * Stops delivery and releases the receiver and any direct-topic subscription. Does not close the shared session.
+     *
+     * @param graceful whether to wait for the in-flight {@code onMessage} call, and its settlement, before releasing
+     *                 the receiver
      */
-    synchronized void close() throws JCSMPException {
+    synchronized void close(boolean graceful) throws JCSMPException {
         stop();
-        // Drain any in-flight service invocation / settlement before releasing the receiver and session, since those
-        // tasks may still call ack / commit / rollback on this flow.
         if (messageListener != null) {
-            messageListener.shutdown();
+            messageListener.shutdown(graceful);
         }
         if (flow != null) {
             flow.close();
