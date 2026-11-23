@@ -23,9 +23,10 @@ const string RECONNECT_CONSUMER_TOPIC = "test/reconnect/direct/consumer";
 const string RECONNECT_LISTENER_TOPIC = "test/reconnect/direct/listener";
 const string RECONNECT_CONSUMER_CLIENT = "reconnect-direct-consumer";
 const string RECONNECT_LISTENER_CLIENT = "reconnect-direct-listener";
-const decimal RECONNECT_SETTLE_TIME = 5;
+const int RECONNECT_MAX_ATTEMPTS = 30;
 
-final http:Client sempClient = check new (SEMP_URL, auth = {username: "admin", password: "admin"});
+// The test broker's admin user is also its SEMP user.
+final http:Client sempClient = check new (SEMP_URL, auth = {username: BROKER_USERNAME, password: BROKER_PASSWORD});
 
 // Forces the broker to drop the client's session; the connector then reconnects it.
 isolated function disconnectClient(string clientName) returns error? {
@@ -49,10 +50,15 @@ function testDirectConsumerReceivesAfterReconnect() returns error? {
     StringPayloadMessage? before = check consumer->receive(DEFAULT_RECEIVE_TIMEOUT);
 
     check disconnectClient(RECONNECT_CONSUMER_CLIENT);
-    runtime:sleep(RECONNECT_SETTLE_TIME);
 
-    check producer->send({payload: "after"}, {topicName: RECONNECT_CONSUMER_TOPIC});
-    StringPayloadMessage? after = check consumer->receive(DEFAULT_RECEIVE_TIMEOUT);
+    // Direct messages sent while the session is still reconnecting are lost, so keep sending until one arrives.
+    StringPayloadMessage? after = ();
+    int attempt = 0;
+    while after is () && attempt < RECONNECT_MAX_ATTEMPTS {
+        check producer->send({payload: "after"}, {topicName: RECONNECT_CONSUMER_TOPIC});
+        after = check consumer->receive(1);
+        attempt += 1;
+    }
     check consumer->close();
     check producer->close();
 
@@ -86,10 +92,14 @@ function testDirectServiceReceivesAfterReconnect() returns error? {
     waitForMessages(reconnectRecorder, 1);
 
     check disconnectClient(RECONNECT_LISTENER_CLIENT);
-    runtime:sleep(RECONNECT_SETTLE_TIME);
 
-    check producer->send({payload: "after"}, {topicName: RECONNECT_LISTENER_TOPIC});
-    waitForMessages(reconnectRecorder, 2);
+    // Direct messages sent while the session is still reconnecting are lost, so keep sending until one arrives.
+    int attempt = 0;
+    while !reconnectRecorder.contains("after") && attempt < RECONNECT_MAX_ATTEMPTS {
+        check producer->send({payload: "after"}, {topicName: RECONNECT_LISTENER_TOPIC});
+        runtime:sleep(1);
+        attempt += 1;
+    }
     error? stopped = directListener.gracefulStop();
     check producer->close();
 

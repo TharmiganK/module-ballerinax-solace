@@ -26,6 +26,8 @@ import com.solacesystems.jcsmp.JCSMPSession;
 import com.solacesystems.jcsmp.Topic;
 import com.solacesystems.jcsmp.XMLMessageConsumer;
 
+import java.util.logging.Logger;
+
 import static io.ballerina.lib.solace.consumer.ConsumerUtils.SUBSCRIPTION_TYPE_DIRECT_TOPIC;
 
 /**
@@ -34,6 +36,8 @@ import static io.ballerina.lib.solace.consumer.ConsumerUtils.SUBSCRIPTION_TYPE_D
  * {@link XMLMessageConsumer} (direct topic).
  */
 final class AttachedService {
+
+    private static final Logger LOGGER = Logger.getLogger(AttachedService.class.getName());
 
     private final String subscriptionType;
     private final FlowReceiver flow;
@@ -113,7 +117,8 @@ final class AttachedService {
         }
         if (consumer != null) {
             try {
-                if (directTopic != null && session != null) {
+                // A closed session's subscriptions are already gone on the broker.
+                if (directTopic != null && session != null && !session.isClosed()) {
                     removeDirectSubscription();
                 }
             } finally {
@@ -129,6 +134,9 @@ final class AttachedService {
             if (e.getSubcodeEx() != JCSMPErrorResponseSubcodeEx.SUBSCRIPTION_NOT_FOUND) {
                 throw e;
             }
+            LOGGER.warning("Direct topic subscription '" + directTopic.getName()
+                    + "' was not found on the broker when the service was stopped; it may not have been re-applied "
+                    + "after a reconnect.");
         }
     }
 }
