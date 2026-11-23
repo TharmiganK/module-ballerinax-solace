@@ -18,11 +18,13 @@
 
 package io.ballerina.lib.solace.listener;
 
+import com.solacesystems.jcsmp.ClosedFacilityException;
 import com.solacesystems.jcsmp.FlowReceiver;
 import com.solacesystems.jcsmp.JCSMPErrorResponseException;
 import com.solacesystems.jcsmp.JCSMPErrorResponseSubcodeEx;
 import com.solacesystems.jcsmp.JCSMPException;
 import com.solacesystems.jcsmp.JCSMPSession;
+import com.solacesystems.jcsmp.JCSMPTransportException;
 import com.solacesystems.jcsmp.Topic;
 import com.solacesystems.jcsmp.XMLMessageConsumer;
 
@@ -134,9 +136,10 @@ final class AttachedService {
             if (e.getSubcodeEx() != JCSMPErrorResponseSubcodeEx.SUBSCRIPTION_NOT_FOUND) {
                 throw e;
             }
-            LOGGER.warning("Direct topic subscription '" + directTopic.getName()
-                    + "' was not found on the broker when the service was stopped; it may not have been re-applied "
-                    + "after a reconnect.");
+            LOGGER.warning("Direct topic subscription '" + directTopic.getName() + "' was not found on the broker "
+                    + "when the service was detached or stopped; it may not have been re-applied after a reconnect.");
+        } catch (ClosedFacilityException | JCSMPTransportException e) {
+            // The session is down, so the broker has already dropped its subscriptions.
         }
     }
 }

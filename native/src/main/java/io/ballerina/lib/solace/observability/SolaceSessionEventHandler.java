@@ -23,6 +23,7 @@ import com.solacesystems.jcsmp.SessionEventHandler;
 import io.ballerina.runtime.api.values.BObject;
 
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.logging.Logger;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_EVENT_HANDLER;
 import static io.ballerina.lib.solace.observability.SolaceObservabilityConstants.EVENT_DOWN;
@@ -33,6 +34,8 @@ import static io.ballerina.lib.solace.observability.SolaceObservabilityConstants
  * Translates JCSMP session events into connectivity metrics.
  */
 public class SolaceSessionEventHandler implements SessionEventHandler {
+
+    private static final Logger LOGGER = Logger.getLogger(SolaceSessionEventHandler.class.getName());
 
     private final String context;
     private final String url;
@@ -93,8 +96,11 @@ public class SolaceSessionEventHandler implements SessionEventHandler {
                     markDisconnected();
                     SolaceMetricsUtil.reportConnectionError(context, url, vpn);
                 }
+                // With REAPPLY_SUBSCRIPTIONS, a subscription the broker refuses after a reconnect arrives here.
+                case SUBSCRIPTION_ERROR -> LOGGER.warning("Solace subscription error on " + url + " (" + vpn + "): "
+                        + event.getInfo() + " (response code " + event.getResponseCode() + ")");
                 default -> {
-                    // SUBSCRIPTION_ERROR, VIRTUAL_ROUTER_NAME_CHANGED and friends are not connectivity transitions.
+                    // VIRTUAL_ROUTER_NAME_CHANGED and friends are not connectivity transitions.
                 }
             }
         } catch (Throwable ignored) {
