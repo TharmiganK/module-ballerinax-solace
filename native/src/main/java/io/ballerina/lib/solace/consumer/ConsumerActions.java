@@ -315,8 +315,8 @@ public class ConsumerActions {
             return receiveError;
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_NACK);
-            return CommonUtils.createError(receiveError.getErrorMessage().getValue()
-                    + "; the message could not be settled: " + e.getMessage(), receiveError);
+            return CommonUtils.createErrorWithCause("Failed to settle a message that could not be received: "
+                    + e.getMessage(), receiveError);
         }
     }
 
