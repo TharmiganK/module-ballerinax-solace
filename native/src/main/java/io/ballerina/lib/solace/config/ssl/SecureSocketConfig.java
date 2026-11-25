@@ -31,7 +31,7 @@ import static io.ballerina.lib.solace.common.CommonUtils.convertToStringArray;
  *
  * @param validation         certificate validation settings
  * @param trustStore         trust store configuration, or null
- * @param keyStore           key store configuration for client certificate authentication, or null
+ * @param keyStore           key store configuration (not used until client certificate auth is supported), or null
  * @param trustedCommonNames list of acceptable common names for broker certificate validation
  * @param excludedProtocols  list of SSL/TLS protocol versions to exclude from use
  * @param cipherSuites       list of cipher suites to enable for the connection, or null

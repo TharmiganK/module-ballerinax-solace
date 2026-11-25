@@ -30,11 +30,14 @@ import io.ballerina.lib.solace.config.ssl.SecureSocketConfig;
 import io.ballerina.lib.solace.config.ssl.TrustStoreConfig;
 
 import java.util.Arrays;
+import java.util.logging.Logger;
 
 /**
  * Utility class for building JCSMP properties from Ballerina configuration objects.
  */
 public final class ConfigurationUtils {
+
+    private static final Logger LOGGER = Logger.getLogger(ConfigurationUtils.class.getName());
 
     private ConfigurationUtils() {
     }
@@ -183,8 +186,11 @@ public final class ConfigurationUtils {
             props.setProperty(JCSMPProperties.SSL_TRUST_STORE_FORMAT, trustStore.format());
         }
 
-        // Set key store for client certificate authentication
+        // JCSMP loads the key store only under the client certificate auth scheme, which cannot be selected yet.
         if (secureSocket.keyStore() != null) {
+            LOGGER.warning("secureSocket.keyStore has no effect for " + props.getStringProperty(JCSMPProperties.HOST)
+                    + ": client certificate authentication is not supported yet, so the auth configuration is used "
+                    + "to authenticate.");
             KeyStoreConfig keyStore = secureSocket.keyStore();
             props.setProperty(JCSMPProperties.SSL_KEY_STORE, keyStore.location());
             props.setProperty(JCSMPProperties.SSL_KEY_STORE_PASSWORD, keyStore.password());

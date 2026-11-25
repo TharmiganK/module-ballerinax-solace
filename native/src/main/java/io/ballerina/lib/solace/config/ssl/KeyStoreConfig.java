@@ -23,7 +23,7 @@ import io.ballerina.runtime.api.values.BMap;
 import io.ballerina.runtime.api.values.BString;
 
 /**
- * Key store configuration for client certificate authentication.
+ * Key store configuration, reserved for client certificate authentication, which is not supported yet.
  *
  * @param location    URL or file path of key store
  * @param password    password for key store

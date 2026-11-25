@@ -234,3 +234,17 @@ isolated function testConsumerKerberosAuthIsRecognized() returns error? {
                 "Failure must not indicate fallback to Basic authentication: " + message);
     }
 }
+
+@test:Config {groups: ["producer", "auth", "tls"]}
+isolated function testKeyStoreDoesNotReplaceAuth() returns error? {
+    // The key store is not used yet, so a TLS connection with one still authenticates with auth.
+    MessageProducer producer = check new (BROKER_URL_TLS, {
+        messageVpn: MESSAGE_VPN,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+        secureSocket: {
+            trustStore: {location: CLIENT_TRUSTSTORE_PATH, password: CLIENT_TRUSTSTORE_PASSWORD, format: PKCS12},
+            keyStore: {location: CLIENT_TRUSTSTORE_PATH, password: CLIENT_TRUSTSTORE_PASSWORD, format: PKCS12}
+        }
+    });
+    check producer->close();
+}
