@@ -145,19 +145,19 @@ public class MessageConverter {
         // Set sender timestamp if present
         Long senderTimestamp = xmlMessage.getSenderTimestamp();
         if (senderTimestamp != null) {
-            message.put(SENDER_TIMESTAMP_KEY, senderTimestamp.intValue());
+            message.put(SENDER_TIMESTAMP_KEY, senderTimestamp);
         }
 
         // Set receive timestamp if present (0 means not set)
         long receiveTimestamp = xmlMessage.getReceiveTimestamp();
         if (receiveTimestamp > 0) {
-            message.put(RECEIVE_TIMESTAMP_KEY, (int) receiveTimestamp);
+            message.put(RECEIVE_TIMESTAMP_KEY, receiveTimestamp);
         }
 
         // Set sequence number if present
         Long sequenceNumber = xmlMessage.getSequenceNumber();
         if (sequenceNumber != null) {
-            message.put(SEQUENCE_NUMBER_KEY, sequenceNumber.intValue());
+            message.put(SEQUENCE_NUMBER_KEY, sequenceNumber);
         }
 
         // Set redelivered flag
@@ -166,7 +166,7 @@ public class MessageConverter {
         try {
             int deliveryCount = xmlMessage.getDeliveryCount();
             if (deliveryCount > 0) {
-                message.put(DELIVERY_COUNT_KEY, deliveryCount);
+                message.put(DELIVERY_COUNT_KEY, (long) deliveryCount);
             }
         } catch (UnsupportedOperationException ignored) {
         }
