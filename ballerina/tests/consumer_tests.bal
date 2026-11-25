@@ -956,7 +956,20 @@ function testWaitingReceiveDoesNotBlockOtherStrands() returns error? {
 
 @test:Config {groups: ["consumer", "concurrency"]}
 function testCloseEndsWaitingReceive() returns error? {
-    MessageConsumer consumer = check newConcurrencyConsumer();
+    check assertCloseEndsWaitingReceive(check newConcurrencyConsumer());
+}
+
+@test:Config {groups: ["consumer", "concurrency"]}
+function testCloseEndsWaitingDirectTopicReceive() returns error? {
+    MessageConsumer consumer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+        subscriptionConfig: {topicName: CONSUMER_CONCURRENCY_TOPIC}
+    });
+    check assertCloseEndsWaitingReceive(consumer);
+}
+
+function assertCloseEndsWaitingReceive(MessageConsumer consumer) returns error? {
     // A finite timeout makes this fail rather than hang if close does not end the wait.
     future<Message|Error?> pending = start receiveOnNonIsolatedStrand(consumer, 20);
     runtime:sleep(0.5);
@@ -966,6 +979,9 @@ function testCloseEndsWaitingReceive() returns error? {
     Message|Error? result = wait pending;
     decimal elapsed = time:monotonicNow() - startedAt;
     test:assertTrue(closed is (), "close should succeed");
-    test:assertTrue(result is Error, "close should make a waiting receive return an Error");
+    if result !is Error {
+        test:assertFail("close should make a waiting receive return an Error");
+    }
+    test:assertEquals(result.message(), "Consumer is closed");
     test:assertTrue(elapsed < 10d, string `receive returned ${elapsed} s after close`);
 }

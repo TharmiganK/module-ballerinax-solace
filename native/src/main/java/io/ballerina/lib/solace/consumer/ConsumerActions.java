@@ -50,6 +50,7 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSED;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSING;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CONSUMER_FLOW_STATE_TRACKER;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CONSUMER;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_DESTINATION;
@@ -223,13 +224,17 @@ public class ConsumerActions {
                     try {
                         message = flowReceiver.receive((int) timeoutMs);
                     } catch (Exception e) {
-                        return new FlowReceiveFailure(e);
+                        return new ReceiveFailure(e);
                     }
                 } else if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(subscriptionType)) {
                     if (xmlConsumer == null) {
                         return CommonUtils.createError("Consumer not initialized");
                     }
-                    message = xmlConsumer.receive((int) timeoutMs);
+                    try {
+                        message = xmlConsumer.receive((int) timeoutMs);
+                    } catch (Exception e) {
+                        return new ReceiveFailure(e);
+                    }
                 }
                 if (message == null) {
                     return emptyReceiveResult(consumer);
@@ -247,8 +252,14 @@ public class ConsumerActions {
                 }
             });
 
-            if (result instanceof FlowReceiveFailure failure) {
+            if (result instanceof ReceiveFailure failure) {
                 SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
+                if (isClosing(consumer)) {
+                    return consumerClosedError();
+                }
+                if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(subscriptionType)) {
+                    return CommonUtils.createError("Failed to receive message", failure.cause());
+                }
                 if (shouldMapToFlowDownError(true, flowState(consumer))) {
                     return flowDownError();
                 }
@@ -269,8 +280,8 @@ public class ConsumerActions {
     }
 
     private static Object emptyReceiveResult(BObject consumer) {
-        if (Boolean.TRUE.equals(consumer.getNativeData(NATIVE_CLOSED))) {
-            return reportConsumerFailure(consumer, ERROR_TYPE_RECEIVE, "Consumer is closed");
+        if (isClosing(consumer)) {
+            return consumerClosedError();
         }
         String errorType = flowStateErrorType(flowState(consumer));
         if (INACTIVE_FLOW_ERROR.equals(errorType)) {
@@ -301,7 +312,16 @@ public class ConsumerActions {
         return tracker == null ? ConsumerFlowStateTracker.State.UNKNOWN : tracker.state();
     }
 
-    private record FlowReceiveFailure(Exception cause) {
+    private record ReceiveFailure(Exception cause) {
+    }
+
+    private static boolean isClosing(BObject consumer) {
+        return Boolean.TRUE.equals(consumer.getNativeData(NATIVE_CLOSING))
+                || Boolean.TRUE.equals(consumer.getNativeData(NATIVE_CLOSED));
+    }
+
+    private static BError consumerClosedError() {
+        return CommonUtils.createError("Consumer is closed");
     }
 
     /**
@@ -589,6 +609,8 @@ public class ConsumerActions {
     }
 
     private static BError closeConsumerResources(BObject consumer) {
+        // Set before closing so a receive woken by the close reports "Consumer is closed".
+        consumer.addNativeData(NATIVE_CLOSING, true);
         String subscriptionType = (String) consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE);
         FlowReceiver flowReceiver = (FlowReceiver) consumer.getNativeData(NATIVE_FLOW);
         XMLMessageConsumer xmlConsumer = (XMLMessageConsumer) consumer.getNativeData(NATIVE_CONSUMER);
