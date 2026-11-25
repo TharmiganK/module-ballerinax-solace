@@ -54,6 +54,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_ATTACH_LOCK;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_AUTO_ACK;
@@ -320,38 +321,44 @@ public class ListenerActions {
     }
 
     private static Object stop(BObject listener, boolean graceful) {
-        List<AttachedService> services;
-        CompletableFuture<Void> stopped;
-        CompletableFuture<?> earlierStop = null;
+        StopInProgress earlierStop;
+        StopInProgress thisStop;
         synchronized (attachLock(listener)) {
-            Object running = listener.getNativeData(NATIVE_STOPPED);
-            if (running instanceof CompletableFuture<?> future) {
-                earlierStop = future;
-                stopped = null;
-                services = List.of();
-            } else {
-                stopped = new CompletableFuture<>();
-                listener.addNativeData(NATIVE_STOPPED, stopped);
+            earlierStop = (StopInProgress) listener.getNativeData(NATIVE_STOPPED);
+            if (earlierStop == null) {
                 Map<BObject, AttachedService> attached = servicesMap(listener);
-                services = new ArrayList<>(attached.values());
+                thisStop = new StopInProgress(new CompletableFuture<>(), new ArrayList<>(attached.values()),
+                        new AtomicBoolean());
+                listener.addNativeData(NATIVE_STOPPED, thisStop);
                 attached.clear();
                 listener.addNativeData(NATIVE_STARTED, false);
                 listener.addNativeData(NATIVE_CLOSED, true);
+            } else {
+                thisStop = null;
             }
         }
         if (earlierStop != null) {
-            // A later stop returns once the first one has released everything.
-            earlierStop.join();
-            return null;
+            if (graceful) {
+                // A later graceful stop returns once the first one has released everything.
+                earlierStop.done().join();
+                return null;
+            }
+            // A later immediateStop does not wait behind a graceful stop that is waiting on onMessage.
+            return releaseListener(listener, earlierStop, false);
         }
         try {
-            return releaseListener(listener, services, graceful);
+            return releaseListener(listener, thisStop, graceful);
         } finally {
-            stopped.complete(null);
+            thisStop.done().complete(null);
         }
     }
 
-    private static Object releaseListener(BObject listener, List<AttachedService> services, boolean graceful) {
+    private record StopInProgress(CompletableFuture<Void> done, List<AttachedService> services,
+                                  AtomicBoolean sessionReleased) {
+    }
+
+    private static Object releaseListener(BObject listener, StopInProgress stop, boolean graceful) {
+        List<AttachedService> services = stop.services();
         // The waits below run outside the attach lock, so an in-flight onMessage can still call the listener.
         Exception firstError = null;
         // Stop delivery to every service before waiting on any of them, so none keeps receiving meanwhile.
@@ -364,6 +371,9 @@ public class ListenerActions {
             firstError = firstError == null ? e : firstError;
         }
 
+        if (!stop.sessionReleased().compareAndSet(false, true)) {
+            return firstError == null ? null : CommonUtils.createError("Failed to stop listener", firstError);
+        }
         TransactedSession txSession = (TransactedSession) listener.getNativeData(NATIVE_TX_SESSION);
         if (txSession != null) {
             Exception e = CommonUtils.attemptClose(txSession::close);
