@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - [Fix a message sent with an empty `userData` array never being accepted by the broker, which made `sendAwaitAcknowledgement` time out and blocked later guaranteed sends on the same producer; an empty `userData` is now sent as if the field were absent](https://github.com/ballerina-platform/ballerina-library/issues/9865)
 - [Fix the `senderTimestamp`, `receiveTimestamp` and `sequenceNumber` of a received message being truncated to 32 bits, which made every epoch-millisecond timestamp and any sequence number above 2^31-1 wrong, for both `MessageConsumer` and `Listener`](https://github.com/ballerina-platform/ballerina-library/issues/9844)
 - [Fix `secureSocket.trustedCommonNames` being ignored, so a broker certificate whose common name was not in the list was accepted; a connection now fails when the certificate's common name is not in a non-empty list](https://github.com/ballerina-platform/ballerina-library/issues/9861)
+- [Fix direct topic `MessageConsumer`s and `Listener` services silently stopping receiving after the session reconnects, because the topic subscriptions were not re-applied, and `gracefulStop` then failing with `400: Subscription Not Found`; a subscription the broker refuses when re-applying it is now logged as a warning](https://github.com/ballerina-platform/ballerina-library/issues/9863)
 
 ### Changed
 

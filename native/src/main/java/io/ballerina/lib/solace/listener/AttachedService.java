@@ -18,11 +18,17 @@
 
 package io.ballerina.lib.solace.listener;
 
+import com.solacesystems.jcsmp.ClosedFacilityException;
 import com.solacesystems.jcsmp.FlowReceiver;
+import com.solacesystems.jcsmp.JCSMPErrorResponseException;
+import com.solacesystems.jcsmp.JCSMPErrorResponseSubcodeEx;
 import com.solacesystems.jcsmp.JCSMPException;
 import com.solacesystems.jcsmp.JCSMPSession;
+import com.solacesystems.jcsmp.JCSMPTransportException;
 import com.solacesystems.jcsmp.Topic;
 import com.solacesystems.jcsmp.XMLMessageConsumer;
+
+import java.util.logging.Logger;
 
 import static io.ballerina.lib.solace.consumer.ConsumerUtils.SUBSCRIPTION_TYPE_DIRECT_TOPIC;
 
@@ -32,6 +38,8 @@ import static io.ballerina.lib.solace.consumer.ConsumerUtils.SUBSCRIPTION_TYPE_D
  * {@link XMLMessageConsumer} (direct topic).
  */
 final class AttachedService {
+
+    private static final Logger LOGGER = Logger.getLogger(AttachedService.class.getName());
 
     private final String subscriptionType;
     private final FlowReceiver flow;
@@ -110,10 +118,28 @@ final class AttachedService {
             flow.close();
         }
         if (consumer != null) {
-            if (directTopic != null && session != null) {
-                session.removeSubscription(directTopic);
+            try {
+                // A closed session's subscriptions are already gone on the broker.
+                if (directTopic != null && session != null && !session.isClosed()) {
+                    removeDirectSubscription();
+                }
+            } finally {
+                consumer.close();
             }
-            consumer.close();
+        }
+    }
+
+    private void removeDirectSubscription() throws JCSMPException {
+        try {
+            session.removeSubscription(directTopic);
+        } catch (JCSMPErrorResponseException e) {
+            if (e.getSubcodeEx() != JCSMPErrorResponseSubcodeEx.SUBSCRIPTION_NOT_FOUND) {
+                throw e;
+            }
+            LOGGER.warning("Direct topic subscription '" + directTopic.getName() + "' was not found on the broker "
+                    + "when the service was detached or stopped; it may not have been re-applied after a reconnect.");
+        } catch (ClosedFacilityException | JCSMPTransportException e) {
+            // The session is down, so the broker has already dropped its subscriptions.
         }
     }
 }
