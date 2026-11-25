@@ -186,7 +186,9 @@ public type SecureSocket record {|
     # supported yet: the key store is not loaded or validated, and the `auth` configuration is used to authenticate
     # to the broker.
     KeyStore keyStore?;
-    # The list of trusted common names for certificate validation
+    # The common names to accept in the broker certificate (at most 16). When set to a non-empty list, the connection
+    # fails unless the certificate's common name (CN) is in the list; an empty list applies no CN check. Applies only when `validation.enabled` is true; usually used
+    # with `validation.validateHostname` set to false, since the CN check replaces the hostname check
     string[] trustedCommonNames?;
     # The SSL/TLS protocols NOT to use. None are excluded by default
     Protocol[] excludedProtocols = [];

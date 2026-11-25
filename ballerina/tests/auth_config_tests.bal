@@ -235,6 +235,59 @@ isolated function testConsumerKerberosAuthIsRecognized() returns error? {
     }
 }
 
+isolated function newTlsProducer(SecureSocket secureSocket) returns MessageProducer|Error =>
+    new (BROKER_URL_TLS, {
+    messageVpn: MESSAGE_VPN,
+    auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+    secureSocket
+});
+
+@test:Config {groups: ["producer", "auth", "tls"]}
+isolated function testTrustedCommonNamesRejectsMismatch() returns error? {
+    MessageProducer|Error producer = newTlsProducer({
+        trustStore: {location: CLIENT_TRUSTSTORE_PATH, password: CLIENT_TRUSTSTORE_PASSWORD, format: PKCS12},
+        trustedCommonNames: ["nomatch"]
+    });
+    test:assertTrue(producer is Error, "A broker certificate whose CN is not trusted should be rejected");
+    if producer is Error {
+        test:assertTrue(producer.message().includes("no common name match"), producer.message());
+    } else {
+        check producer->close();
+    }
+}
+
+@test:Config {groups: ["producer", "auth", "tls"]}
+isolated function testTrustedCommonNamesAcceptsMatch() returns error? {
+    MessageProducer producer = check newTlsProducer({
+        trustStore: {location: CLIENT_TRUSTSTORE_PATH, password: CLIENT_TRUSTSTORE_PASSWORD, format: PKCS12},
+        trustedCommonNames: ["other", "localhost"]
+    });
+    check producer->close();
+}
+
+@test:Config {groups: ["producer", "auth", "tls"]}
+isolated function testExcludedProtocolsAreApplied() returns error? {
+    MessageProducer|Error producer = newTlsProducer({
+        trustStore: {location: CLIENT_TRUSTSTORE_PATH, password: CLIENT_TRUSTSTORE_PASSWORD, format: PKCS12},
+        excludedProtocols: [TLSV1_1, TLSV1_2, TLSV1_3]
+    });
+    test:assertTrue(producer is Error, "Excluding every TLS version should leave no protocol to connect with");
+    if producer is Error {
+        test:assertTrue(producer.message().includes("Error communicating with the router"), producer.message());
+    } else {
+        check producer->close();
+    }
+}
+
+@test:Config {groups: ["producer", "auth", "tls"]}
+isolated function testExcludedProtocolsAllowRemainingVersion() returns error? {
+    MessageProducer producer = check newTlsProducer({
+        trustStore: {location: CLIENT_TRUSTSTORE_PATH, password: CLIENT_TRUSTSTORE_PASSWORD, format: PKCS12},
+        excludedProtocols: [TLSV1_1, TLSV1_2]
+    });
+    check producer->close();
+}
+
 @test:Config {groups: ["producer", "auth", "tls"]}
 isolated function testKeyStoreDoesNotReplaceAuth() returns error? {
     // The key store is not used yet, so a TLS connection with one still authenticates with auth.
@@ -247,4 +300,41 @@ isolated function testKeyStoreDoesNotReplaceAuth() returns error? {
         }
     });
     check producer->close();
+}
+
+@test:Config {groups: ["producer", "validation", "negative"]}
+isolated function testTrustedCommonNamesRejectsInvalidEntries() returns error? {
+    foreach string name in ["", "Acme, Inc", "localhost "] {
+        MessageProducer|Error producer = newTlsProducer({
+            trustStore: {location: CLIENT_TRUSTSTORE_PATH, password: CLIENT_TRUSTSTORE_PASSWORD, format: PKCS12},
+            trustedCommonNames: [name]
+        });
+        test:assertTrue(producer is Error, string `'${name}' should be rejected`);
+        if producer is Error {
+            test:assertTrue(producer.message().startsWith("Invalid trusted common name"), producer.message());
+        } else {
+            check producer->close();
+        }
+    }
+}
+
+@test:Config {groups: ["producer", "auth", "tls"]}
+isolated function testCipherSuitesAreApplied() returns error? {
+    // Every SslCipherSuite is a TLS 1.2 CBC suite, and the test broker accepts none of them over TLS 1.2. So TLS 1.2
+    // alone connects, and adding cipherSuites makes it fail only if the list is read and applied.
+    TrustStore trustStore = {location: CLIENT_TRUSTSTORE_PATH, password: CLIENT_TRUSTSTORE_PASSWORD, format: PKCS12};
+    MessageProducer tls12Only = check newTlsProducer({trustStore, excludedProtocols: [TLSV1_1, TLSV1_3]});
+    check tls12Only->close();
+
+    MessageProducer|Error restricted = newTlsProducer({
+        trustStore,
+        excludedProtocols: [TLSV1_1, TLSV1_3],
+        cipherSuites: [ECDHE_RSA_AES256_CBC_SHA384]
+    });
+    test:assertTrue(restricted is Error, "A cipher suite the broker does not accept should fail the handshake");
+    if restricted is Error {
+        test:assertTrue(restricted.message().includes("Error communicating with the router"), restricted.message());
+    } else {
+        check restricted->close();
+    }
 }
