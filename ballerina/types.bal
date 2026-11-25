@@ -390,7 +390,7 @@ public type Message record {|
     int sequenceNumber?;
     # Properties map for custom key-value pairs
     map<Property> properties?;
-    # Application-specific user data attachment (max 36 bytes)
+    # Application-specific user data attachment (max 36 bytes). An empty array is sent as if the field were absent
     byte[] userData?;
     # Receive timestamp in UTC milliseconds from epoch (set by broker)
     int receiveTimestamp?;

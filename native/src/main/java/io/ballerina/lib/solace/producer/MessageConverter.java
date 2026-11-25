@@ -186,7 +186,9 @@ public class MessageConverter {
             if (userDataBytes.length > 36) {
                 throw new IllegalArgumentException("userData cannot exceed 36 bytes, got " + userDataBytes.length);
             }
-            jcsmpMessage.setUserData(userDataBytes);
+            if (userDataBytes.length > 0) {
+                jcsmpMessage.setUserData(userDataBytes);
+            }
         }
 
         // Custom properties (SDTMap)

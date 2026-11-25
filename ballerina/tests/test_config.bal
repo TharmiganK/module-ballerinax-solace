@@ -65,6 +65,7 @@ const string PRODUCER_METADATA_QUEUE = "test/producer/metadata/queue";
 const string PRODUCER_TTL_QUEUE = "test/producer/ttl/queue";
 const string PRODUCER_PERSISTENT_QUEUE = "test/producer/persistent/queue";
 const string PRODUCER_USERDATA_QUEUE = "test/producer/userdata/queue";
+const string PRODUCER_EMPTY_USERDATA_QUEUE = "test/producer/userdata/empty/queue";
 const string PRODUCER_COMPRESSION_QUEUE = "test/producer/compression/queue";
 const string PRODUCER_GRACEFUL_CLOSE_QUEUE = "test/producer/graceful-close/queue";
 const int GRACEFUL_CLOSE_ROUND_COUNT = 10;
