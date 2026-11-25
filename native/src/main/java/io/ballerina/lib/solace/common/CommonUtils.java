@@ -27,8 +27,6 @@ import io.ballerina.runtime.api.values.BMap;
 import io.ballerina.runtime.api.values.BString;
 
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 import static io.ballerina.lib.solace.common.MessageFieldConstants.PAYLOAD_KEY;
@@ -159,22 +157,6 @@ public class CommonUtils {
             return false;
         }
         return Boolean.TRUE.equals(message.get(REDELIVERED_KEY));
-    }
-
-    /**
-     * Converts an array of Objects to an array of Strings.
-     *
-     * @param objectArray array of Objects
-     * @return array of Strings
-     */
-    public static String[] convertToStringArray(Object[] objectArray) {
-        if (Objects.isNull(objectArray)) {
-            return new String[]{ };
-        }
-        return Arrays.stream(objectArray)
-                .filter(Objects::nonNull)
-                .map(Object::toString)
-                .toArray(String[]::new);
     }
 
     /**
