@@ -77,9 +77,13 @@ final class SolaceMessageListener implements XMLMessageListener {
     private final String destination;
     private final String destinationKind;
     private final ExecutorService dispatcher;
+    private final boolean queuedRedelivered;
+    private volatile boolean stopping;
+    private volatile boolean skipQueued;
 
-    SolaceMessageListener(Runtime runtime, Service nativeService, BObject caller, boolean autoAck, String url,
-                          String vpn, String destination, String destinationKind) {
+    SolaceMessageListener(Runtime runtime, Service nativeService, BObject caller, boolean autoAck,
+                          boolean queuedRedelivered, String url, String vpn, String destination,
+                          String destinationKind) {
         this.runtime = runtime;
         this.nativeService = nativeService;
         this.caller = caller;
@@ -88,6 +92,7 @@ final class SolaceMessageListener implements XMLMessageListener {
         this.vpn = vpn;
         this.destination = destination;
         this.destinationKind = destinationKind;
+        this.queuedRedelivered = queuedRedelivered;
         this.dispatcher = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "solace-listener-dispatch");
             thread.setDaemon(true);
@@ -124,7 +129,12 @@ final class SolaceMessageListener implements XMLMessageListener {
         SolaceMetricsUtil.reportConsume(url, vpn, destination, destinationKind,
                 CommonUtils.getPayloadSize(ballerinaMessage), CommonUtils.isRedelivered(ballerinaMessage));
         Map<String, String> traceContext = SolaceTracingUtil.extractTraceContextHeaders(ballerinaMessage);
-        submit(() -> deliver(message, ballerinaMessage, traceContext));
+        submit(() -> {
+            // A message queued behind the in-flight one when the service stops is left for the broker to redeliver.
+            if (!(stopping && skipQueued)) {
+                deliver(message, ballerinaMessage, traceContext);
+            }
+        });
     }
 
     private void deliver(BytesXMLMessage message, BMap<BString, Object> ballerinaMessage,
@@ -245,17 +255,24 @@ final class SolaceMessageListener implements XMLMessageListener {
     }
 
     /**
-     * Stops the dispatch executor. Called when the service is detached or the listener is stopped.
+     * Stops dispatching. A graceful shutdown waits, without a time limit, for the in-flight {@code onMessage} and, when
+     * the broker would not redeliver them (direct topic, transacted session), for the queued messages too.
      */
-    void shutdown() {
+    void shutdown(boolean graceful) {
+        skipQueued = !graceful || queuedRedelivered;
+        stopping = true;
         dispatcher.shutdown();
+        if (!graceful) {
+            return;
+        }
         try {
-            if (!dispatcher.awaitTermination(5, TimeUnit.SECONDS)) {
-                dispatcher.shutdownNow();
+            boolean terminated = false;
+            while (!terminated) {
+                terminated = dispatcher.awaitTermination(1, TimeUnit.MINUTES);
             }
         } catch (InterruptedException e) {
-            dispatcher.shutdownNow();
             Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting for onMessage to complete", e);
         }
     }
 }

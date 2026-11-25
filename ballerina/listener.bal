@@ -84,7 +84,8 @@ public isolated class Listener {
 
     # Detach a service from the listener.
     #
-    # Stops and closes the flow/consumer associated with the service.
+    # Stops and closes the flow/consumer associated with the service, after waiting for its in-flight
+    # `onMessage` as `gracefulStop` does. Do not call it from that service's own `onMessage`, which it would wait for.
     #
     # + s - The service object to detach
     # + return - Error if detachment fails
@@ -103,8 +104,12 @@ public isolated class Listener {
 
     # Gracefully stop the listener.
     #
-    # Stops delivery to attached services and waits for in-flight message processing to complete
-    # before closing resources.
+    # Stops delivery to attached services and waits, without a time limit, for in-flight message
+    # processing to complete before closing resources. Messages on a queue or durable topic endpoint that
+    # were received but not yet passed to `onMessage` are left unsettled, so the broker redelivers them;
+    # on a direct topic or a transacted listener they are processed before the listener stops. Do not call
+    # it from the `onMessage` of a service attached to this listener, which it would wait for. Call
+    # `immediateStop` to stop a listener whose graceful stop is waiting on an `onMessage` that does not return.
     #
     # + return - Error if stop fails
     public isolated function gracefulStop() returns Error? = @java:Method {
@@ -113,7 +118,9 @@ public isolated class Listener {
 
     # Immediately stop the listener.
     #
-    # Stops delivery and closes resources without waiting for in-flight processing.
+    # Stops delivery and closes resources without waiting for in-flight processing, including when a
+    # `gracefulStop` or `detach` is already waiting for it. The in-flight `onMessage` keeps running, and
+    # settling its message fails once the resources are closed.
     #
     # + return - Error if stop fails
     public isolated function immediateStop() returns Error? = @java:Method {

@@ -28,6 +28,7 @@ import com.solacesystems.jcsmp.JCSMPTransportException;
 import com.solacesystems.jcsmp.Topic;
 import com.solacesystems.jcsmp.XMLMessageConsumer;
 
+import java.util.concurrent.CompletableFuture;
 import java.util.logging.Logger;
 
 import static io.ballerina.lib.solace.consumer.ConsumerUtils.SUBSCRIPTION_TYPE_DIRECT_TOPIC;
@@ -48,6 +49,8 @@ final class AttachedService {
     private final JCSMPSession session;
     private final SolaceMessageListener messageListener;
     private boolean started;
+    private CompletableFuture<Void> closing;
+    private boolean released;
 
     private AttachedService(String subscriptionType, FlowReceiver flow, XMLMessageConsumer consumer,
                             Topic directTopic, JCSMPSession session, SolaceMessageListener messageListener) {
@@ -78,7 +81,7 @@ final class AttachedService {
      * Begins message delivery for this service.
      */
     synchronized void start() throws JCSMPException {
-        if (started) {
+        if (started || closing != null) {
             return;
         }
         if (flow != null) {
@@ -106,13 +109,52 @@ final class AttachedService {
 
     /**
      * Stops delivery and releases the receiver and any direct-topic subscription. Does not close the shared session.
+     *
+     * @param graceful whether to wait for the in-flight {@code onMessage} call, and its settlement, before releasing
+     *                 the receiver
      */
-    synchronized void close() throws JCSMPException {
-        stop();
-        // Drain any in-flight service invocation / settlement before releasing the receiver and session, since those
-        // tasks may still call ack / commit / rollback on this flow.
-        if (messageListener != null) {
-            messageListener.shutdown();
+    void close(boolean graceful) throws JCSMPException {
+        CompletableFuture<Void> earlierClose;
+        CompletableFuture<Void> thisClose = new CompletableFuture<>();
+        synchronized (this) {
+            earlierClose = closing;
+            if (earlierClose == null) {
+                closing = thisClose;
+                stop();
+            }
+        }
+        if (earlierClose != null) {
+            if (graceful) {
+                earlierClose.join();
+                return;
+            }
+            // An immediate stop does not wait behind an earlier graceful close: it skips the queued messages and
+            // releases the receiver while the in-flight onMessage keeps running.
+            if (messageListener != null) {
+                messageListener.shutdown(false);
+            }
+            releaseReceiver();
+            return;
+        }
+        try {
+            if (messageListener != null) {
+                messageListener.shutdown(graceful);
+            }
+        } finally {
+            try {
+                releaseReceiver();
+            } finally {
+                thisClose.complete(null);
+            }
+        }
+    }
+
+    private void releaseReceiver() throws JCSMPException {
+        synchronized (this) {
+            if (released) {
+                return;
+            }
+            released = true;
         }
         if (flow != null) {
             flow.close();

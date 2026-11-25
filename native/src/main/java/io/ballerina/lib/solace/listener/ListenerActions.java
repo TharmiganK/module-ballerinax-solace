@@ -49,8 +49,12 @@ import io.ballerina.runtime.api.values.BMap;
 import io.ballerina.runtime.api.values.BObject;
 import io.ballerina.runtime.api.values.BString;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_ATTACH_LOCK;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_AUTO_ACK;
@@ -62,6 +66,7 @@ import static io.ballerina.lib.solace.common.Constants.NATIVE_RUNTIME;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_SERVICES;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_STARTED;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_STOPPED;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TRANSACTED;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_URL;
@@ -214,8 +219,9 @@ public class ListenerActions {
                 caller.addNativeData(NATIVE_DESTINATION_KIND, destinationKind);
                 caller.addNativeData(NATIVE_AUTO_ACK, autoAck);
 
+                boolean queuedRedelivered = !directTopic && !isTransacted;
                 SolaceMessageListener messageListener = new SolaceMessageListener(runtime, nativeService, caller,
-                        autoAck, url, vpn, destinationName, destinationKind);
+                        autoAck, queuedRedelivered, url, vpn, destinationName, destinationKind);
 
                 AttachedService attached = createReceiver(session, txSession, isTransacted, subscriptionConfig,
                         messageListener);
@@ -226,7 +232,7 @@ public class ListenerActions {
                     try {
                         attached.start();
                     } catch (Exception e) {
-                        CommonUtils.closeQuietly(attached::close);
+                        CommonUtils.closeQuietly(() -> attached.close(false));
                         throw e;
                     }
                 }
@@ -243,20 +249,28 @@ public class ListenerActions {
     /**
      * Detach a service: stop and close its receiver and drop it from the listener.
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param listener the Ballerina listener object
      * @param service  the Ballerina service object
      * @return null on success, BError on failure
      */
-    public static Object detach(BObject listener, BObject service) {
+    public static Object detach(Environment env, BObject listener, BObject service) {
         try {
+            AttachedService attached;
             synchronized (attachLock(listener)) {
-                AttachedService attached = servicesMap(listener).remove(service);
-                if (attached != null) {
-                    attached.close();
-                }
+                attached = servicesMap(listener).get(service);
+            }
+            if (attached == null) {
                 return null;
             }
-        } catch (Exception e) {
+            // Wait outside the attach lock and with the strand yielded, so onMessage can still use the listener. The
+            // service stays registered until it is closed, so attach still sees its queue or topic as taken.
+            Exception e = env.yieldAndRun(() -> CommonUtils.attemptClose(() -> attached.close(true)));
+            synchronized (attachLock(listener)) {
+                servicesMap(listener).remove(service, attached);
+            }
+            return e == null ? null : CommonUtils.createError("Failed to detach service", e);
+        } catch (RuntimeException e) {
             return CommonUtils.createError("Failed to detach service", e);
         }
     }
@@ -287,57 +301,95 @@ public class ListenerActions {
     /**
      * Gracefully stop the listener: pause delivery (letting in-flight processing finish) and release all resources.
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param listener the Ballerina listener object
      * @return null on success, BError on failure
      */
-    public static Object gracefulStop(BObject listener) {
-        return stop(listener, true);
+    public static Object gracefulStop(Environment env, BObject listener) {
+        return env.yieldAndRun(() -> stop(listener, true));
     }
 
     /**
      * Immediately stop the listener: release all resources without waiting for in-flight processing.
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param listener the Ballerina listener object
      * @return null on success, BError on failure
      */
-    public static Object immediateStop(BObject listener) {
-        return stop(listener, false);
+    public static Object immediateStop(Environment env, BObject listener) {
+        return env.yieldAndRun(() -> stop(listener, false));
     }
 
     private static Object stop(BObject listener, boolean graceful) {
+        StopInProgress earlierStop;
+        StopInProgress thisStop;
         synchronized (attachLock(listener)) {
-            Map<BObject, AttachedService> services = servicesMap(listener);
-            Exception firstError = null;
-            for (AttachedService attached : services.values()) {
-                if (graceful) {
-                    Exception e = CommonUtils.attemptClose(attached::stop);
-                    firstError = firstError == null ? e : firstError;
-                }
-                Exception e = CommonUtils.attemptClose(attached::close);
-                firstError = firstError == null ? e : firstError;
+            earlierStop = (StopInProgress) listener.getNativeData(NATIVE_STOPPED);
+            if (earlierStop == null) {
+                Map<BObject, AttachedService> attached = servicesMap(listener);
+                thisStop = new StopInProgress(new CompletableFuture<>(), new ArrayList<>(attached.values()),
+                        new AtomicBoolean());
+                listener.addNativeData(NATIVE_STOPPED, thisStop);
+                attached.clear();
+                listener.addNativeData(NATIVE_STARTED, false);
+                listener.addNativeData(NATIVE_CLOSED, true);
+            } else {
+                thisStop = null;
             }
-            services.clear();
-
-            TransactedSession txSession = (TransactedSession) listener.getNativeData(NATIVE_TX_SESSION);
-            if (txSession != null) {
-                Exception e = CommonUtils.attemptClose(txSession::close);
-                firstError = firstError == null ? e : firstError;
-            }
-            JCSMPSession session = (JCSMPSession) listener.getNativeData(NATIVE_SESSION);
-            if (session != null) {
-                Exception e = CommonUtils.attemptClose(session::closeSession);
-                firstError = firstError == null ? e : firstError;
-            }
-
-            listener.addNativeData(NATIVE_STARTED, false);
-            listener.addNativeData(NATIVE_CLOSED, true);
-            SolaceSessionEventHandler.markDisconnected(listener);
-
-            if (firstError != null) {
-                return CommonUtils.createError("Failed to stop listener", firstError);
-            }
-            return null;
         }
+        if (earlierStop != null) {
+            if (graceful) {
+                // A later graceful stop returns once the first one has released everything.
+                earlierStop.done().join();
+                return null;
+            }
+            // A later immediateStop does not wait behind a graceful stop that is waiting on onMessage.
+            return releaseListener(listener, earlierStop, false);
+        }
+        try {
+            return releaseListener(listener, thisStop, graceful);
+        } finally {
+            thisStop.done().complete(null);
+        }
+    }
+
+    private record StopInProgress(CompletableFuture<Void> done, List<AttachedService> services,
+                                  AtomicBoolean sessionReleased) {
+    }
+
+    private static Object releaseListener(BObject listener, StopInProgress stop, boolean graceful) {
+        List<AttachedService> services = stop.services();
+        // The waits below run outside the attach lock, so an in-flight onMessage can still call the listener.
+        Exception firstError = null;
+        // Stop delivery to every service before waiting on any of them, so none keeps receiving meanwhile.
+        for (AttachedService attached : services) {
+            Exception e = CommonUtils.attemptClose(attached::stop);
+            firstError = firstError == null ? e : firstError;
+        }
+        for (AttachedService attached : services) {
+            Exception e = CommonUtils.attemptClose(() -> attached.close(graceful));
+            firstError = firstError == null ? e : firstError;
+        }
+
+        if (!stop.sessionReleased().compareAndSet(false, true)) {
+            return firstError == null ? null : CommonUtils.createError("Failed to stop listener", firstError);
+        }
+        TransactedSession txSession = (TransactedSession) listener.getNativeData(NATIVE_TX_SESSION);
+        if (txSession != null) {
+            Exception e = CommonUtils.attemptClose(txSession::close);
+            firstError = firstError == null ? e : firstError;
+        }
+        JCSMPSession session = (JCSMPSession) listener.getNativeData(NATIVE_SESSION);
+        if (session != null) {
+            Exception e = CommonUtils.attemptClose(session::closeSession);
+            firstError = firstError == null ? e : firstError;
+        }
+        SolaceSessionEventHandler.markDisconnected(listener);
+
+        if (firstError != null) {
+            return CommonUtils.createError("Failed to stop listener", firstError);
+        }
+        return null;
     }
 
     /**

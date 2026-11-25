@@ -45,6 +45,7 @@ public class Constants {
     public static final String NATIVE_RUNTIME = "native.runtime";
     public static final String NATIVE_SERVICES = "native.services";
     public static final String NATIVE_STARTED = "native.started";
+    public static final String NATIVE_STOPPED = "native.stopped";
     public static final String NATIVE_ATTACH_LOCK = "native.attach.lock";
 
 }
