@@ -283,6 +283,10 @@ public class ProducerActions {
                 Object acknowledgementResult = CommonUtils.executeBlocking(env, () -> awaitAcknowledgement(
                         finalTracker, finalAwaitedPublish, acknowledgementTimeout, destinationName));
                 if (acknowledgementResult instanceof BError acknowledgementError) {
+                    // Claimed only now that the caller gets the rejection; a cancelled wait leaves it for close().
+                    if (PUBLISH_REJECTED_ERROR.equals(acknowledgementError.getType().getName())) {
+                        tracker.claimRejection(awaitedPublish.key());
+                    }
                     SolaceMetricsUtil.reportProducerError(producer, destinationName, destinationKind,
                             ERROR_TYPE_PUBLISH);
                     return acknowledgementError;
@@ -336,7 +340,6 @@ public class ProducerActions {
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof JCSMPException) {
-                tracker.claimRejection(awaitedPublish.key());
                 return CommonUtils.createError(PUBLISH_REJECTED_ERROR, String.format(
                         "The broker rejected the message published to '%s': %s", destinationName,
                         cause.getMessage()));
