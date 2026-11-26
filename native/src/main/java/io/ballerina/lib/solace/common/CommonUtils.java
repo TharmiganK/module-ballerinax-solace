@@ -52,6 +52,14 @@ public class CommonUtils {
     }
 
     /**
+     * Creates a Ballerina Solace error that keeps the given Ballerina error as its cause.
+     */
+    public static BError createErrorWithCause(String message, BError cause) {
+        return ErrorCreator.createError(ModuleUtils.getModule(), SOLACE_ERROR, StringUtils.fromString(message), cause,
+                null);
+    }
+
+    /**
      * Creates a Ballerina error from just a message.
      */
     public static BError createError(String message) {

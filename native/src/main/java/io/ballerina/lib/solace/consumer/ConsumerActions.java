@@ -54,6 +54,7 @@ import static io.ballerina.lib.solace.common.Constants.NATIVE_CONSUMER_FLOW_STAT
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CONSUMER;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_DESTINATION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_FLOW;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_SETTLE_UNDELIVERED;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_SUBSCRIPTION_TYPE;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TRANSACTED;
@@ -136,6 +137,10 @@ public class ConsumerActions {
             consumer.addNativeData(NATIVE_SESSION, session);
             consumer.addNativeData(NATIVE_TX_SESSION, txSession);
             consumer.addNativeData(NATIVE_TRANSACTED, isTransacted);
+            boolean directTopic = subscriptionConfig instanceof TopicConsumerConfig topicSubscription
+                    && !topicSubscription.isDurable();
+            consumer.addNativeData(NATIVE_SETTLE_UNDELIVERED, !isTransacted && !directTopic
+                    && subscriptionConfig.ackMode() == AcknowledgementMode.CLIENT_ACK);
             consumer.addNativeData(NATIVE_CLOSED, false);
             consumer.addNativeData(NATIVE_URL, url.getValue());
             consumer.addNativeData(NATIVE_VPN, messageVpn);
@@ -231,9 +236,13 @@ public class ConsumerActions {
                 try {
                     return MessageConverter.toBallerinaMessage(message, bTypedesc);
                 } catch (BallerinaSolaceDatabindingException e) {
-                    return CommonUtils.createError(e.getMessage());
-                } catch (Exception e) {
-                    return CommonUtils.createError("Failed to receive message", e);
+                    return settleUndelivered(consumer, message, XMLMessage.Outcome.REJECTED,
+                            CommonUtils.createError(e.getMessage()));
+                } catch (Throwable t) {
+                    // Converting the same message fails the same way, so only a JVM Error is requeued.
+                    return settleUndelivered(consumer, message,
+                            t instanceof Exception ? XMLMessage.Outcome.REJECTED : XMLMessage.Outcome.FAILED,
+                            CommonUtils.createError("Failed to receive message", t));
                 }
             });
 
@@ -290,6 +299,28 @@ public class ConsumerActions {
     }
 
     /**
+     * Settles a non-transacted CLIENT_ACK message that the caller never gets: REJECTED when converting it fails the
+     * same way every time, FAILED when a possibly transient JVM error stopped the conversion.
+     */
+    private static BError settleUndelivered(BObject consumer, BytesXMLMessage message, XMLMessage.Outcome outcome,
+                                            BError receiveError) {
+        if (!Boolean.TRUE.equals(consumer.getNativeData(NATIVE_SETTLE_UNDELIVERED))) {
+            return receiveError;
+        }
+        SolaceMetricsUtil.reportConsume(consumer, message.getContentLength() + message.getAttachmentContentLength(),
+                message.getRedelivered());
+        try {
+            message.settle(outcome);
+            SolaceMetricsUtil.reportNack(consumer, outcome == XMLMessage.Outcome.FAILED);
+            return receiveError;
+        } catch (Exception e) {
+            SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_NACK);
+            return CommonUtils.createErrorWithCause("Failed to settle a message that could not be received: "
+                    + e.getMessage(), receiveError);
+        }
+    }
+
+    /**
      * Receive a message without waiting.
      *
      * @param env       the Ballerina environment (injected for tracing)
@@ -327,9 +358,13 @@ public class ConsumerActions {
                 try {
                     return MessageConverter.toBallerinaMessage(message, bTypedesc);
                 } catch (BallerinaSolaceDatabindingException e) {
-                    return CommonUtils.createError(e.getMessage());
-                } catch (Exception e) {
-                    return CommonUtils.createError("Failed to receive message", e);
+                    return settleUndelivered(consumer, message, XMLMessage.Outcome.REJECTED,
+                            CommonUtils.createError(e.getMessage()));
+                } catch (Throwable t) {
+                    // Converting the same message fails the same way, so only a JVM Error is requeued.
+                    return settleUndelivered(consumer, message,
+                            t instanceof Exception ? XMLMessage.Outcome.REJECTED : XMLMessage.Outcome.FAILED,
+                            CommonUtils.createError("Failed to receive message", t));
                 }
             });
 
