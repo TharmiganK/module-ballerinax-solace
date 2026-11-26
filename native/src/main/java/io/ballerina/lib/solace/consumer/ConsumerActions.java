@@ -222,6 +222,9 @@ public class ConsumerActions {
             return reportConsumerFailure(consumer, ERROR_TYPE_RECEIVE, "Timeout must not be negative");
         }
         long requestedMs = timeoutDecimal.multiply(BigDecimal.valueOf(1000)).longValue();
+        if (requestedMs == 0 && timeoutDecimal.signum() > 0) {
+            requestedMs = 1;
+        }
         int timeoutMs = (int) Math.min(requestedMs, Integer.MAX_VALUE);
         String subscriptionType = (String) consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE);
 
@@ -231,9 +234,10 @@ public class ConsumerActions {
         ReentrantLock txLock = (ReentrantLock) consumer.getNativeData(NATIVE_TX_LOCK);
         try {
             Object result = CommonUtils.executeBlocking(env, () -> txLock == null
-                    ? receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, timeoutMs, false, bTypedesc)
-                    : receiveInTransaction(txLock, timeoutMs, waitMs -> receiveOne(consumer, subscriptionType,
-                            flowReceiver, xmlConsumer, waitMs, false, bTypedesc), consumer));
+                    ? receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, timeoutMs, false, true,
+                            bTypedesc)
+                    : receiveInTransaction(txLock, timeoutMs, sliceMs -> receiveOne(consumer, subscriptionType,
+                            flowReceiver, xmlConsumer, sliceMs, false, false, bTypedesc), consumer));
 
             if (result == CONSUMER_CLOSED) {
                 return consumerClosedError();
@@ -267,10 +271,12 @@ public class ConsumerActions {
     }
 
     /**
-     * Takes one message and converts it, waiting up to {@code waitMs} milliseconds (0 waits indefinitely).
+     * Takes one message and converts it, waiting up to {@code waitMs} milliseconds (0 waits indefinitely). When nothing
+     * arrives, {@code checkFlowState} reports an inactive or down flow instead of returning nil.
      */
     private static Object receiveOne(BObject consumer, String subscriptionType, FlowReceiver flowReceiver,
-                                     XMLMessageConsumer xmlConsumer, int waitMs, boolean noWait, BTypedesc bTypedesc) {
+                                     XMLMessageConsumer xmlConsumer, int waitMs, boolean noWait,
+                                     boolean checkFlowState, BTypedesc bTypedesc) {
         BytesXMLMessage message = null;
         try {
             if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
@@ -290,7 +296,7 @@ public class ConsumerActions {
             return new ReceiveFailure(e);
         }
         if (message == null) {
-            if (!noWait) {
+            if (checkFlowState) {
                 return emptyReceiveResult(consumer);
             }
             return isClosing(consumer) ? CONSUMER_CLOSED : null;
@@ -351,9 +357,14 @@ public class ConsumerActions {
             return;
         }
         if (!Boolean.TRUE.equals(consumer.getNativeData(NATIVE_SETTLE_UNDELIVERED))) {
-            String fate = consumer.getNativeData(NATIVE_TX_SESSION) != null
-                    ? "it stays in the transaction and is settled by the next commit or rollback"
-                    : "it was already acknowledged";
+            String fate;
+            if (consumer.getNativeData(NATIVE_TX_SESSION) != null) {
+                fate = "it stays in the transaction and is settled by the next commit or rollback";
+            } else if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE))) {
+                fate = "direct messages are not redelivered, so it is discarded";
+            } else {
+                fate = "it was already acknowledged, so it is not redelivered";
+            }
             LOGGER.warning("A receive was cancelled after it took message " + message.getMessageId() + "; " + fate
                     + ".");
             return;
@@ -456,14 +467,14 @@ public class ConsumerActions {
         try {
             Object result = CommonUtils.executeBlocking(env, () -> {
                 if (txLock == null) {
-                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, 0, true, bTypedesc);
+                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, 0, true, false, bTypedesc);
                 }
                 // A receive or commit in progress on the transacted session means no message is available now.
                 if (!txLock.tryLock()) {
                     return null;
                 }
                 try {
-                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, 0, true, bTypedesc);
+                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, 0, true, false, bTypedesc);
                 } finally {
                     txLock.unlock();
                 }

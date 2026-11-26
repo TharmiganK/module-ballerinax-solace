@@ -423,9 +423,13 @@ isolated function testInactiveTransactedQueueConsumerReturnsTypedError() returns
         subscriptionConfig: {queueName: CONSUMER_TX_STANDBY_QUEUE}
     });
 
+    decimal startedAt = time:monotonicNow();
     Message|Error? result = standbyConsumer->receive(SHORT_RECEIVE_TIMEOUT);
+    decimal elapsed = time:monotonicNow() - startedAt;
     test:assertTrue(result is InactiveFlowError,
         "An inactive transacted flow must return InactiveFlowError");
+    test:assertTrue(elapsed >= SHORT_RECEIVE_TIMEOUT - 0.2d,
+        string `An inactive transacted flow should be reported after the timeout, not after ${elapsed} s`);
 
     check standbyConsumer->close();
     check activeConsumer->close();

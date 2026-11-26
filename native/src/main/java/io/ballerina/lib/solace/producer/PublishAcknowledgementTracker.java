@@ -120,6 +120,19 @@ final class PublishAcknowledgementTracker {
     }
 
     /**
+     * Stops waiting for a sent message's confirmation while keeping it tracked, so a later rejection is counted for
+     * {@code close()} like a plain send's.
+     */
+    void detachAwaiter(long key) {
+        lock.lock();
+        try {
+            confirmations.remove(key);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
      * Records a positive broker acknowledgement.
      *
      * @param key JCSMP correlation key

@@ -296,8 +296,12 @@ public class ProducerActions {
             // A key whose message was never sent would hold close() for its drain timeout. A sent message keeps its
             // key, so a later broker rejection is still reported by close().
             boolean messageSent = sent || (e.taskCompleted() && !(e.taskResult() instanceof BError));
-            if (tracker != null && correlationKey != null && !messageSent) {
-                tracker.cancel(correlationKey);
+            if (tracker != null && correlationKey != null) {
+                if (messageSent) {
+                    tracker.detachAwaiter(correlationKey);
+                } else {
+                    tracker.cancel(correlationKey);
+                }
             }
             throw e.panic();
         } catch (Exception e) {
