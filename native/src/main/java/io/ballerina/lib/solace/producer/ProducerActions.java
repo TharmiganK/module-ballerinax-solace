@@ -53,6 +53,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSED;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSE_LOCK;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_EVENT_HANDLER;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_PUBLISH_ACK_TRACKER;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_PRODUCER;
@@ -149,6 +150,7 @@ public class ProducerActions {
             producer.addNativeData(NATIVE_TRANSACTED, isTransacted);
             producer.addNativeData(NATIVE_PRODUCER, xmlProducer);
             producer.addNativeData(NATIVE_CLOSED, false);
+            producer.addNativeData(NATIVE_CLOSE_LOCK, new ReentrantLock());
             producer.addNativeData(NATIVE_URL, url.getValue());
             producer.addNativeData(NATIVE_VPN, messageVpn);
             producer.addNativeData(NATIVE_EVENT_HANDLER, eventHandler);
@@ -299,6 +301,10 @@ public class ProducerActions {
             if (tracker != null && correlationKey != null) {
                 if (messageSent) {
                     tracker.detachAwaiter(correlationKey);
+                    if (e.taskResult() instanceof BError rejection
+                            && PUBLISH_REJECTED_ERROR.equals(rejection.getType().getName())) {
+                        tracker.recordRejection(rejection.getMessage());
+                    }
                 } else {
                     tracker.cancel(correlationKey);
                 }
@@ -473,12 +479,20 @@ public class ProducerActions {
     }
 
     private static BError closeProducer(BObject producer) {
-        // close now yields, so two strands can reach here together; only the first one closes.
-        synchronized (producer) {
+        // close now yields, so two strands can reach here together; only the first one closes. A ReentrantLock, unlike
+        // synchronized, does not pin the strand's virtual thread while the close drains publishes.
+        ReentrantLock closeLock = (ReentrantLock) producer.getNativeData(NATIVE_CLOSE_LOCK);
+        if (closeLock == null) {
+            return Boolean.TRUE.equals(producer.getNativeData(NATIVE_CLOSED)) ? null : closeProducerResources(producer);
+        }
+        closeLock.lock();
+        try {
             if (Boolean.TRUE.equals(producer.getNativeData(NATIVE_CLOSED))) {
                 return null;
             }
             return closeProducerResources(producer);
+        } finally {
+            closeLock.unlock();
         }
     }
 

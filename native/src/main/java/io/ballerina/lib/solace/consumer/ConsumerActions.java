@@ -54,6 +54,7 @@ import java.util.function.IntFunction;
 import java.util.logging.Logger;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSED;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSE_LOCK;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSING;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CONSUMER_FLOW_STATE_TRACKER;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CONSUMER;
@@ -154,6 +155,7 @@ public class ConsumerActions {
                     && subscriptionConfig.ackMode() == AcknowledgementMode.CLIENT_ACK);
             consumer.addNativeData(NATIVE_CLOSED, false);
             consumer.addNativeData(NATIVE_CLOSING, false);
+            consumer.addNativeData(NATIVE_CLOSE_LOCK, new ReentrantLock());
             consumer.addNativeData(NATIVE_URL, url.getValue());
             consumer.addNativeData(NATIVE_VPN, messageVpn);
             consumer.addNativeData(NATIVE_EVENT_HANDLER, eventHandler);
@@ -221,11 +223,10 @@ public class ConsumerActions {
         if (timeoutDecimal.signum() < 0) {
             return reportConsumerFailure(consumer, ERROR_TYPE_RECEIVE, "Timeout must not be negative");
         }
-        long requestedMs = timeoutDecimal.multiply(BigDecimal.valueOf(1000)).longValue();
-        if (requestedMs == 0 && timeoutDecimal.signum() > 0) {
-            requestedMs = 1;
-        }
-        int timeoutMs = (int) Math.min(requestedMs, Integer.MAX_VALUE);
+        BigDecimal requestedMs = timeoutDecimal.multiply(BigDecimal.valueOf(1000));
+        // A positive timeout below 1 ms waits 1 ms, since 0 means never expire.
+        int timeoutMs = requestedMs.compareTo(BigDecimal.valueOf(Integer.MAX_VALUE)) >= 0 ? Integer.MAX_VALUE
+                : timeoutDecimal.signum() > 0 ? Math.max(1, requestedMs.intValue()) : 0;
         String subscriptionType = (String) consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE);
 
         // Read before yielding: a close() from another strand clears these while this one waits.
@@ -262,7 +263,7 @@ public class ConsumerActions {
             reportReceiveOutcome(consumer, result);
             return result;
         } catch (CommonUtils.StrandCancelledException e) {
-            handleCancelledReceive(consumer, e.taskResult());
+            handleCancelledReceive(consumer, e.taskResult(), txLock != null);
             throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
@@ -327,13 +328,17 @@ public class ConsumerActions {
             if (remainingMs <= 0) {
                 return emptyReceiveResult(consumer);
             }
-            int sliceMs = (int) Math.min(remainingMs, TRANSACTED_RECEIVE_SLICE_MS);
-            if (!txLock.tryLock(sliceMs, TimeUnit.MILLISECONDS)) {
+            if (!txLock.tryLock(Math.min(remainingMs, TRANSACTED_RECEIVE_SLICE_MS), TimeUnit.MILLISECONDS)) {
                 continue;
             }
             Object result;
             try {
-                result = receive.apply(sliceMs);
+                long leftMs = timeoutMs == 0 ? TRANSACTED_RECEIVE_SLICE_MS
+                        : TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+                if (leftMs <= 0) {
+                    return emptyReceiveResult(consumer);
+                }
+                result = receive.apply((int) Math.min(leftMs, TRANSACTED_RECEIVE_SLICE_MS));
             } finally {
                 txLock.unlock();
             }
@@ -348,7 +353,7 @@ public class ConsumerActions {
      * the queue for redelivery; otherwise it was acknowledged on receipt, or stays in the transaction, and is logged.
      */
     @SuppressWarnings("unchecked")
-    private static void handleCancelledReceive(BObject consumer, Object taskResult) {
+    private static void handleCancelledReceive(BObject consumer, Object taskResult, boolean transacted) {
         if (!(taskResult instanceof BMap<?, ?> received)) {
             return;
         }
@@ -358,7 +363,7 @@ public class ConsumerActions {
         }
         if (!Boolean.TRUE.equals(consumer.getNativeData(NATIVE_SETTLE_UNDELIVERED))) {
             String fate;
-            if (consumer.getNativeData(NATIVE_TX_SESSION) != null) {
+            if (transacted) {
                 fate = "it stays in the transaction and is settled by the next commit or rollback";
             } else if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE))) {
                 fate = "direct messages are not redelivered, so it is discarded";
@@ -497,7 +502,7 @@ public class ConsumerActions {
             reportReceiveOutcome(consumer, result);
             return result;
         } catch (CommonUtils.StrandCancelledException e) {
-            handleCancelledReceive(consumer, e.taskResult());
+            handleCancelledReceive(consumer, e.taskResult(), txLock != null);
             throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
@@ -698,12 +703,20 @@ public class ConsumerActions {
     }
 
     private static BError closeConsumer(BObject consumer) {
-        // close now yields, so two strands can reach here together; only the first one closes.
-        synchronized (consumer) {
+        // close now yields, so two strands can reach here together; only the first one closes. A ReentrantLock, unlike
+        // synchronized, does not pin the strand's virtual thread while the flow and sessions close.
+        ReentrantLock closeLock = (ReentrantLock) consumer.getNativeData(NATIVE_CLOSE_LOCK);
+        if (closeLock == null) {
+            return Boolean.TRUE.equals(consumer.getNativeData(NATIVE_CLOSED)) ? null : closeConsumerResources(consumer);
+        }
+        closeLock.lock();
+        try {
             if (Boolean.TRUE.equals(consumer.getNativeData(NATIVE_CLOSED))) {
                 return null;
             }
             return closeConsumerResources(consumer);
+        } finally {
+            closeLock.unlock();
         }
     }
 
