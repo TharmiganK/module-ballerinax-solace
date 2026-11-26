@@ -89,6 +89,8 @@ public class ConsumerActions {
 
     private static final String INACTIVE_FLOW_ERROR = "InactiveFlowError";
     private static final String FLOW_DOWN_ERROR = "FlowDownError";
+    // Returned by a receive task that the consumer's close ended, so the caller does not count it as a receive error.
+    private static final Object CONSUMER_CLOSED = new Object();
 
     /**
      * Initialize the consumer with connection URL and configuration. Creates either a transacted or non-transacted
@@ -223,7 +225,8 @@ public class ConsumerActions {
                 if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
                         SUBSCRIPTION_TYPE_DURABLE_TOPIC.equals(subscriptionType)) {
                     if (flowReceiver == null) {
-                        return CommonUtils.createError("Consumer flow not initialized");
+                        return isClosing(consumer) ? CONSUMER_CLOSED
+                                : CommonUtils.createError("Consumer flow not initialized");
                     }
                     try {
                         message = flowReceiver.receive((int) timeoutMs);
@@ -232,7 +235,8 @@ public class ConsumerActions {
                     }
                 } else if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(subscriptionType)) {
                     if (xmlConsumer == null) {
-                        return CommonUtils.createError("Consumer not initialized");
+                        return isClosing(consumer) ? CONSUMER_CLOSED
+                                : CommonUtils.createError("Consumer not initialized");
                     }
                     try {
                         message = xmlConsumer.receive((int) timeoutMs);
@@ -256,11 +260,14 @@ public class ConsumerActions {
                 }
             }));
 
+            if (result == CONSUMER_CLOSED) {
+                return consumerClosedError();
+            }
             if (result instanceof ReceiveFailure failure) {
-                SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
                 if (isClosing(consumer)) {
                     return consumerClosedError();
                 }
+                SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
                 if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(subscriptionType)) {
                     return CommonUtils.createError("Failed to receive message", failure.cause());
                 }
@@ -285,7 +292,7 @@ public class ConsumerActions {
 
     private static Object emptyReceiveResult(BObject consumer) {
         if (isClosing(consumer)) {
-            return consumerClosedError();
+            return CONSUMER_CLOSED;
         }
         String errorType = flowStateErrorType(flowState(consumer));
         if (INACTIVE_FLOW_ERROR.equals(errorType)) {
@@ -374,12 +381,14 @@ public class ConsumerActions {
                 if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
                         SUBSCRIPTION_TYPE_DURABLE_TOPIC.equals(subscriptionType)) {
                     if (flowReceiver == null) {
-                        return CommonUtils.createError("Consumer flow not initialized");
+                        return isClosing(consumer) ? CONSUMER_CLOSED
+                                : CommonUtils.createError("Consumer flow not initialized");
                     }
                     message = flowReceiver.receiveNoWait();
                 } else if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(subscriptionType)) {
                     if (xmlConsumer == null) {
-                        return CommonUtils.createError("Consumer not initialized");
+                        return isClosing(consumer) ? CONSUMER_CLOSED
+                                : CommonUtils.createError("Consumer not initialized");
                     }
                     message = xmlConsumer.receiveNoWait();
                 }
@@ -399,6 +408,9 @@ public class ConsumerActions {
                 }
             }));
 
+            if (result == CONSUMER_CLOSED) {
+                return consumerClosedError();
+            }
             if (result instanceof BError bError) {
                 SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
                 return bError;

@@ -67,7 +67,8 @@ public isolated client class MessageConsumer {
     # Receive a message with a timeout.
     #
     # Blocks up to the specified timeout waiting for a message. Returns nil if an active flow is empty,
-    # `InactiveFlowError` if the flow is inactive, or `FlowDownError` if it is down.
+    # `InactiveFlowError` if the flow is inactive, or `FlowDownError` if it is down. On a transacted consumer, a
+    # `commit` or `rollback` from another strand waits until this returns.
     #
     # If the message cannot be converted or bound to `T`, an `Error` is returned. For a non-transacted `CLIENT_ACK`
     # consumer on a queue or durable topic endpoint, the message is also rejected, because it is never returned to be
@@ -135,6 +136,8 @@ public isolated client class MessageConsumer {
     # Commit the current transaction.
     #
     # Only applicable in transacted mode. Commits all message operations since the last commit/rollback.
+    # On a transacted consumer, `receive`, `receiveNoWait`, `commit` and `rollback` run one at a time, so this
+    # waits for a call already in progress.
     #
     # + return - Error if commit fails
     isolated remote function 'commit() returns Error? = @java:Method {
@@ -144,6 +147,8 @@ public isolated client class MessageConsumer {
     # Rollback the current transaction.
     #
     # Only applicable in transacted mode. Rolls back all message operations since the last commit/rollback.
+    # On a transacted consumer, `receive`, `receiveNoWait`, `commit` and `rollback` run one at a time, so this
+    # waits for a call already in progress.
     #
     # + return - Error if rollback fails
     isolated remote function 'rollback() returns Error? = @java:Method {
