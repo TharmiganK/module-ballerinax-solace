@@ -48,6 +48,7 @@ import java.time.Duration;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -57,6 +58,7 @@ import static io.ballerina.lib.solace.common.Constants.NATIVE_PUBLISH_ACK_TRACKE
 import static io.ballerina.lib.solace.common.Constants.NATIVE_PRODUCER;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TRANSACTED;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_LOCK;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_URL;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_VPN;
@@ -143,6 +145,7 @@ public class ProducerActions {
             // Store session references in native data
             producer.addNativeData(NATIVE_SESSION, session);
             producer.addNativeData(NATIVE_TX_SESSION, txSession);
+            producer.addNativeData(NATIVE_TX_LOCK, txSession != null ? new ReentrantLock() : null);
             producer.addNativeData(NATIVE_TRANSACTED, isTransacted);
             producer.addNativeData(NATIVE_PRODUCER, xmlProducer);
             producer.addNativeData(NATIVE_CLOSED, false);
@@ -226,7 +229,7 @@ public class ProducerActions {
                 return reportPublishFailure(producer, destinationName, destinationKind, "Producer is closed");
             }
 
-            XMLMessage jcsmpMessage = MessageConverter.toJCSMPMessage(xmlProducer, message);
+            XMLMessage jcsmpMessage = MessageConverter.toJCSMPMessage(message);
             injectTraceContext(env, jcsmpMessage);
 
             if (destinationMap == null || destinationMap.isEmpty()) {
@@ -258,9 +261,9 @@ public class ProducerActions {
             final com.solacesystems.jcsmp.Destination finalDestination = jcsmpDestination;
             final Long finalCorrelationKey = correlationKey;
             long startNanos = System.nanoTime();
-            Object result = CommonUtils.executeBlocking(env, () -> {
-                xmlProducer.send(finalMessage, finalDestination);
-            });
+            ReentrantLock txLock = (ReentrantLock) producer.getNativeData(NATIVE_TX_LOCK);
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock,
+                    () -> xmlProducer.send(finalMessage, finalDestination)));
 
             if (result instanceof BError bError) {
                 if (tracker != null && finalCorrelationKey != null) {
@@ -387,7 +390,8 @@ public class ProducerActions {
             }
 
             // Commit transaction on TransactedSession (blocking operation)
-            Object result = CommonUtils.executeBlocking(env, txSession::commit);
+            ReentrantLock txLock = (ReentrantLock) producer.getNativeData(NATIVE_TX_LOCK);
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, txSession::commit));
 
             if (result instanceof BError) {
                 SolaceMetricsUtil.reportProducerError(producer, ERROR_TYPE_COMMIT);
@@ -431,7 +435,8 @@ public class ProducerActions {
             }
 
             // Rollback transaction on TransactedSession (blocking operation)
-            Object result = CommonUtils.executeBlocking(env, txSession::rollback);
+            ReentrantLock txLock = (ReentrantLock) producer.getNativeData(NATIVE_TX_LOCK);
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, txSession::rollback));
 
             if (result instanceof BError) {
                 SolaceMetricsUtil.reportProducerError(producer, ERROR_TYPE_ROLLBACK);

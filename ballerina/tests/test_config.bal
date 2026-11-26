@@ -80,6 +80,8 @@ const string PRODUCER_CONFIRMATION_SHUTDOWN_QUEUE = "test/producer/confirmation/
 const string PRODUCER_TX_COMMIT_QUEUE = "test/producer/tx/commit/queue";
 const string PRODUCER_TX_ROLLBACK_QUEUE = "test/producer/tx/rollback/queue";
 const string PRODUCER_TX_MULTIPLE_QUEUE = "test/producer/tx/multiple/queue";
+const string PRODUCER_CONCURRENCY_QUEUE = "test/producer/concurrency/queue";
+const string PRODUCER_TX_CONCURRENCY_QUEUE = "test/producer/tx/concurrency/queue";
 
 // Producer test topics
 const string PRODUCER_TOPIC = "test/producer/topic";

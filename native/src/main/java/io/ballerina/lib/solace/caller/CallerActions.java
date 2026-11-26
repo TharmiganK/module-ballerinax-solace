@@ -29,9 +29,11 @@ import io.ballerina.runtime.api.values.BMap;
 import io.ballerina.runtime.api.values.BObject;
 import io.ballerina.runtime.api.values.BString;
 
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_AUTO_ACK;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_LOCK;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_SESSION;
 import static io.ballerina.lib.solace.observability.SolaceMetricsUtil.reportConsumerFailure;
 import static io.ballerina.lib.solace.observability.SolaceObservabilityConstants.ERROR_TYPE_ACKNOWLEDGE;
@@ -160,7 +162,8 @@ public class CallerActions {
                             + "Set transacted = true on the listener configuration to enable transactions.");
         }
         try {
-            Object result = CommonUtils.executeBlocking(env, txSession::commit);
+            ReentrantLock txLock = (ReentrantLock) caller.getNativeData(NATIVE_TX_LOCK);
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, txSession::commit));
             if (result instanceof BError bError) {
                 SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_COMMIT);
                 return bError;
@@ -189,7 +192,8 @@ public class CallerActions {
                             + "Set transacted = true on the listener configuration to enable transactions.");
         }
         try {
-            Object result = CommonUtils.executeBlocking(env, txSession::rollback);
+            ReentrantLock txLock = (ReentrantLock) caller.getNativeData(NATIVE_TX_LOCK);
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, txSession::rollback));
             if (result instanceof BError bError) {
                 SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_ROLLBACK);
                 return bError;

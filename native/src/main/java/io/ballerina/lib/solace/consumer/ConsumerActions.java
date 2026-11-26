@@ -48,6 +48,7 @@ import io.ballerina.runtime.api.values.BTypedesc;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSED;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSING;
@@ -59,6 +60,7 @@ import static io.ballerina.lib.solace.common.Constants.NATIVE_SETTLE_UNDELIVERED
 import static io.ballerina.lib.solace.common.Constants.NATIVE_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_SUBSCRIPTION_TYPE;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TRANSACTED;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_LOCK;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_EVENT_HANDLER;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_URL;
@@ -137,6 +139,7 @@ public class ConsumerActions {
             // Store session references and transacted flag
             consumer.addNativeData(NATIVE_SESSION, session);
             consumer.addNativeData(NATIVE_TX_SESSION, txSession);
+            consumer.addNativeData(NATIVE_TX_LOCK, txSession != null ? new ReentrantLock() : null);
             consumer.addNativeData(NATIVE_TRANSACTED, isTransacted);
             boolean directTopic = subscriptionConfig instanceof TopicConsumerConfig topicSubscription
                     && !topicSubscription.isDurable();
@@ -213,8 +216,9 @@ public class ConsumerActions {
         // Read before yielding: a close() from another strand clears these while this one waits.
         FlowReceiver flowReceiver = (FlowReceiver) consumer.getNativeData(NATIVE_FLOW);
         XMLMessageConsumer xmlConsumer = (XMLMessageConsumer) consumer.getNativeData(NATIVE_CONSUMER);
+        ReentrantLock txLock = (ReentrantLock) consumer.getNativeData(NATIVE_TX_LOCK);
         try {
-            Object result = CommonUtils.executeBlocking(env, () -> {
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, () -> {
                 BytesXMLMessage message = null;
                 if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
                         SUBSCRIPTION_TYPE_DURABLE_TOPIC.equals(subscriptionType)) {
@@ -250,7 +254,7 @@ public class ConsumerActions {
                             t instanceof Exception ? XMLMessage.Outcome.REJECTED : XMLMessage.Outcome.FAILED,
                             CommonUtils.createError("Failed to receive message", t));
                 }
-            });
+            }));
 
             if (result instanceof ReceiveFailure failure) {
                 SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
@@ -363,8 +367,9 @@ public class ConsumerActions {
         String subscriptionType = (String) consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE);
         FlowReceiver flowReceiver = (FlowReceiver) consumer.getNativeData(NATIVE_FLOW);
         XMLMessageConsumer xmlConsumer = (XMLMessageConsumer) consumer.getNativeData(NATIVE_CONSUMER);
+        ReentrantLock txLock = (ReentrantLock) consumer.getNativeData(NATIVE_TX_LOCK);
         try {
-            Object result = CommonUtils.executeBlocking(env, () -> {
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, () -> {
                 BytesXMLMessage message = null;
                 if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
                         SUBSCRIPTION_TYPE_DURABLE_TOPIC.equals(subscriptionType)) {
@@ -392,7 +397,7 @@ public class ConsumerActions {
                             t instanceof Exception ? XMLMessage.Outcome.REJECTED : XMLMessage.Outcome.FAILED,
                             CommonUtils.createError("Failed to receive message", t));
                 }
-            });
+            }));
 
             if (result instanceof BError bError) {
                 SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
@@ -526,7 +531,8 @@ public class ConsumerActions {
             }
 
             // Commit transaction on TransactedSession (blocking operation)
-            Object result = CommonUtils.executeBlocking(env, txSession::commit);
+            ReentrantLock txLock = (ReentrantLock) consumer.getNativeData(NATIVE_TX_LOCK);
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, txSession::commit));
 
             if (result instanceof BError) {
                 SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_COMMIT);
@@ -569,7 +575,8 @@ public class ConsumerActions {
             }
 
             // Rollback transaction on TransactedSession (blocking operation)
-            Object result = CommonUtils.executeBlocking(env, txSession::rollback);
+            ReentrantLock txLock = (ReentrantLock) consumer.getNativeData(NATIVE_TX_LOCK);
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, txSession::rollback));
 
             if (result instanceof BError) {
                 SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_ROLLBACK);

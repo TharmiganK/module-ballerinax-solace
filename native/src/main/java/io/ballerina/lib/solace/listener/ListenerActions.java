@@ -55,6 +55,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_ATTACH_LOCK;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_AUTO_ACK;
@@ -68,6 +69,7 @@ import static io.ballerina.lib.solace.common.Constants.NATIVE_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_STARTED;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_STOPPED;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TRANSACTED;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_LOCK;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_URL;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_VPN;
@@ -117,6 +119,7 @@ public class ListenerActions {
 
             listener.addNativeData(NATIVE_SESSION, session);
             listener.addNativeData(NATIVE_TX_SESSION, txSession);
+            listener.addNativeData(NATIVE_TX_LOCK, txSession != null ? new ReentrantLock() : null);
             listener.addNativeData(NATIVE_TRANSACTED, isTransacted);
             listener.addNativeData(NATIVE_CLOSED, false);
             listener.addNativeData(NATIVE_STARTED, false);
@@ -212,6 +215,7 @@ public class ListenerActions {
                 // Create the Caller supplied to onMessage for explicit ack/nack and transaction control.
                 BObject caller = ValueCreator.createObjectValue(ModuleUtils.getModule(), "Caller");
                 caller.addNativeData(NATIVE_TX_SESSION, txSession);
+                caller.addNativeData(NATIVE_TX_LOCK, listener.getNativeData(NATIVE_TX_LOCK));
                 caller.addNativeData(NATIVE_CLOSED, false);
                 caller.addNativeData(NATIVE_URL, url);
                 caller.addNativeData(NATIVE_VPN, vpn);

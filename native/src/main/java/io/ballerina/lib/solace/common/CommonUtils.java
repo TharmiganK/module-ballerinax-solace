@@ -29,6 +29,7 @@ import io.ballerina.runtime.api.values.BString;
 
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 import static io.ballerina.lib.solace.common.MessageFieldConstants.PAYLOAD_KEY;
@@ -101,6 +102,38 @@ public class CommonUtils {
             // The task's own failures are returned above, so this is the runtime cancelling the strand.
             throw new StrandCancelledException(panic);
         }
+    }
+
+    /**
+     * Wraps a task so it holds the transacted session's lock while it runs, since JCSMP requires serial access to a
+     * {@code TransactedSession} and its producers and flows. A null lock, for a non-transacted session, adds nothing.
+     */
+    public static CompletableWithException serialized(ReentrantLock lock, CompletableWithException task) {
+        if (lock == null) {
+            return task;
+        }
+        return () -> {
+            lock.lock();
+            try {
+                return task.run();
+            } finally {
+                lock.unlock();
+            }
+        };
+    }
+
+    public static RunnableWithException serialized(ReentrantLock lock, RunnableWithException task) {
+        if (lock == null) {
+            return task;
+        }
+        return () -> {
+            lock.lock();
+            try {
+                task.run();
+            } finally {
+                lock.unlock();
+            }
+        };
     }
 
     /**
