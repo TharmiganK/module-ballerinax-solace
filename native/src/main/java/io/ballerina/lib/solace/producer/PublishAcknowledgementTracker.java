@@ -44,6 +44,8 @@ final class PublishAcknowledgementTracker {
     private final Condition settlementChanged = lock.newCondition();
     private final Set<Long> pending = new HashSet<>();
     private final Map<Long, CompletableFuture<Void>> confirmations = new HashMap<>();
+    // Rejections delivered to an awaiter that has not reported them yet; close counts any that remain.
+    private final Map<Long, String> unclaimedRejections = new HashMap<>();
     private long nextCorrelationKey;
     private int rejectedCount;
     private String firstRejection;
@@ -120,22 +122,19 @@ final class PublishAcknowledgementTracker {
     }
 
     /**
-     * Counts a rejection that an awaiter received but could not report, so {@code close()} reports it.
+     * Takes ownership of an awaited publish's rejection, which the awaiter then reports, so close does not count it.
      */
-    void recordRejection(String message) {
+    void claimRejection(long key) {
         lock.lock();
         try {
-            rejectedCount++;
-            if (firstRejection == null) {
-                firstRejection = message;
-            }
+            unclaimedRejections.remove(key);
         } finally {
             lock.unlock();
         }
     }
 
     /**
-     * Returns false if the message was already settled, in which case its confirmation carries the outcome.
+     * Stops waiting for a sent message's confirmation, so a later rejection is counted by close like a plain send's.
      */
     boolean detachAwaiter(long key) {
         lock.lock();
@@ -193,7 +192,9 @@ final class PublishAcknowledgementTracker {
             while (!pending.isEmpty() && remaining > 0) {
                 remaining = settlementChanged.awaitNanos(remaining);
             }
-            return new DrainResult(rejectedCount, pending.size(), firstRejection);
+            String first = firstRejection != null ? firstRejection
+                    : unclaimedRejections.values().stream().findFirst().orElse(null);
+            return new DrainResult(rejectedCount + unclaimedRejections.size(), pending.size(), first);
         } finally {
             lock.unlock();
         }
@@ -229,7 +230,9 @@ final class PublishAcknowledgementTracker {
                 return;
             }
             confirmation = confirmations.remove(correlationKey);
-            if (rejection != null && confirmation == null) {
+            if (rejection != null && confirmation != null) {
+                unclaimedRejections.put(correlationKey, rejection.getMessage());
+            } else if (rejection != null) {
                 rejectedCount++;
                 if (firstRejection == null) {
                     firstRejection = rejection.getMessage();

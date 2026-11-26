@@ -45,8 +45,6 @@ import io.ballerina.runtime.api.values.BString;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -302,7 +300,8 @@ public class ProducerActions {
             boolean messageSent = sent || (e.taskCompleted() && !(e.taskResult() instanceof BError));
             if (tracker != null && correlationKey != null) {
                 if (messageSent) {
-                    keepCancelledPublishTracked(tracker, correlationKey, awaitedPublish);
+                    // An unreported rejection stays unclaimed in the tracker, so close() reports it.
+                    tracker.detachAwaiter(correlationKey);
                 } else {
                     tracker.cancel(correlationKey);
                 }
@@ -337,6 +336,7 @@ public class ProducerActions {
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof JCSMPException) {
+                tracker.claimRejection(awaitedPublish.key());
                 return CommonUtils.createError(PUBLISH_REJECTED_ERROR, String.format(
                         "The broker rejected the message published to '%s': %s", destinationName,
                         cause.getMessage()));
@@ -349,24 +349,6 @@ public class ProducerActions {
             return CommonUtils.createError(String.format(
                     "Interrupted while waiting for the broker to acknowledge the message published to '%s'",
                     destinationName), e);
-        }
-    }
-
-    /**
-     * Keeps a sent message tracked after its strand is cancelled, so {@code close()} reports a rejection the cancelled
-     * awaiter can no longer return, including one that settled just before the awaiter was detached.
-     */
-    private static void keepCancelledPublishTracked(PublishAcknowledgementTracker tracker, long key,
-                                                    PublishAcknowledgementTracker.AwaitedPublish awaitedPublish) {
-        if (awaitedPublish == null || tracker.detachAwaiter(key)) {
-            return;
-        }
-        try {
-            awaitedPublish.confirmation().join();
-        } catch (CompletionException | CancellationException e) {
-            if (e.getCause() instanceof JCSMPException rejection) {
-                tracker.recordRejection(rejection.getMessage());
-            }
         }
     }
 
