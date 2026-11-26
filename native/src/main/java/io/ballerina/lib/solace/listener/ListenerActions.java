@@ -119,7 +119,7 @@ public class ListenerActions {
 
             listener.addNativeData(NATIVE_SESSION, session);
             listener.addNativeData(NATIVE_TX_SESSION, txSession);
-            listener.addNativeData(NATIVE_TX_LOCK, txSession != null ? new ReentrantLock() : null);
+            listener.addNativeData(NATIVE_TX_LOCK, txSession != null ? new ReentrantLock(true) : null);
             listener.addNativeData(NATIVE_TRANSACTED, isTransacted);
             listener.addNativeData(NATIVE_CLOSED, false);
             listener.addNativeData(NATIVE_STARTED, false);

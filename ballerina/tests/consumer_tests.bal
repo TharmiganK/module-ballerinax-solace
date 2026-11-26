@@ -1034,3 +1034,38 @@ function testTransactedReceiveKeepsItsTimeoutWhileAnotherWaits() returns error? 
     test:assertTrue(timedElapsed < 3d, string `receive(1) took ${timedElapsed} s while another receive waited`);
 }
 
+@test:Config {groups: ["consumer", "transacted", "concurrency"]}
+function testTransactedCommitDoesNotWaitForAnOpenEndedReceive() returns error? {
+    MessageConsumer consumer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        transacted: true,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+        subscriptionConfig: {queueName: CONSUMER_TX_CONCURRENCY_QUEUE}
+    });
+    future<Message|Error?> waiting = start receiveOnNonIsolatedStrand(consumer, ());
+    runtime:sleep(0.5);
+
+    decimal startedAt = time:monotonicNow();
+    check consumer->'commit();
+    decimal elapsed = time:monotonicNow() - startedAt;
+    check consumer->close();
+    Message|Error? waited = wait waiting;
+    test:assertTrue(elapsed < 2d, string `commit waited ${elapsed} s for a receive with no timeout`);
+    test:assertTrue(waited is Error, "close should end the waiting receive");
+}
+
+@test:Config {groups: ["consumer", "validation", "negative"]}
+function testReceiveRejectsNegativeTimeout() returns error? {
+    MessageConsumer consumer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+        subscriptionConfig: {queueName: CONSUMER_TX_CONCURRENCY_QUEUE}
+    });
+    Message|Error? result = consumer->receive(-1);
+    check consumer->close();
+    if result !is Error {
+        test:assertFail("A negative timeout should be rejected");
+    }
+    test:assertEquals(result.message(), "Timeout must not be negative");
+}
+

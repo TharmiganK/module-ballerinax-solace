@@ -50,6 +50,8 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.IntFunction;
+import java.util.logging.Logger;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSED;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSING;
@@ -92,7 +94,8 @@ public class ConsumerActions {
     private static final String FLOW_DOWN_ERROR = "FlowDownError";
     // Returned by a receive task that the consumer's close ended, so the caller does not count it as a receive error.
     private static final Object CONSUMER_CLOSED = new Object();
-    private static final int NO_WAIT = -1;
+    private static final int TRANSACTED_RECEIVE_SLICE_MS = 100;
+    private static final Logger LOGGER = Logger.getLogger(ConsumerActions.class.getName());
 
     /**
      * Initialize the consumer with connection URL and configuration. Creates either a transacted or non-transacted
@@ -143,13 +146,14 @@ public class ConsumerActions {
             // Store session references and transacted flag
             consumer.addNativeData(NATIVE_SESSION, session);
             consumer.addNativeData(NATIVE_TX_SESSION, txSession);
-            consumer.addNativeData(NATIVE_TX_LOCK, txSession != null ? new ReentrantLock() : null);
+            consumer.addNativeData(NATIVE_TX_LOCK, txSession != null ? new ReentrantLock(true) : null);
             consumer.addNativeData(NATIVE_TRANSACTED, isTransacted);
             boolean directTopic = subscriptionConfig instanceof TopicConsumerConfig topicSubscription
                     && !topicSubscription.isDurable();
             consumer.addNativeData(NATIVE_SETTLE_UNDELIVERED, !isTransacted && !directTopic
                     && subscriptionConfig.ackMode() == AcknowledgementMode.CLIENT_ACK);
             consumer.addNativeData(NATIVE_CLOSED, false);
+            consumer.addNativeData(NATIVE_CLOSING, false);
             consumer.addNativeData(NATIVE_URL, url.getValue());
             consumer.addNativeData(NATIVE_VPN, messageVpn);
             consumer.addNativeData(NATIVE_EVENT_HANDLER, eventHandler);
@@ -214,7 +218,11 @@ public class ConsumerActions {
             return reportConsumerFailure(consumer, ERROR_TYPE_RECEIVE, "Consumer is closed");
         }
         BigDecimal timeoutDecimal = timeout instanceof BDecimal bDecimal ? bDecimal.decimalValue() : BigDecimal.ZERO;
-        long timeoutMs = timeoutDecimal.multiply(BigDecimal.valueOf(1000)).longValue();
+        if (timeoutDecimal.signum() < 0) {
+            return reportConsumerFailure(consumer, ERROR_TYPE_RECEIVE, "Timeout must not be negative");
+        }
+        long requestedMs = timeoutDecimal.multiply(BigDecimal.valueOf(1000)).longValue();
+        int timeoutMs = (int) Math.min(requestedMs, Integer.MAX_VALUE);
         String subscriptionType = (String) consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE);
 
         // Read before yielding: a close() from another strand clears these while this one waits.
@@ -222,27 +230,10 @@ public class ConsumerActions {
         XMLMessageConsumer xmlConsumer = (XMLMessageConsumer) consumer.getNativeData(NATIVE_CONSUMER);
         ReentrantLock txLock = (ReentrantLock) consumer.getNativeData(NATIVE_TX_LOCK);
         try {
-            Object result = CommonUtils.executeBlocking(env, () -> {
-                if (txLock == null) {
-                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, (int) timeoutMs,
-                            bTypedesc);
-                }
-                // Wait for the transacted session only as long as this receive may wait, then receive for the rest.
-                long startNanos = System.nanoTime();
-                if (timeoutMs <= 0) {
-                    txLock.lock();
-                } else if (!txLock.tryLock(timeoutMs, TimeUnit.MILLISECONDS)) {
-                    return emptyReceiveResult(consumer);
-                }
-                try {
-                    long remainingMs = timeoutMs <= 0 ? 0
-                            : Math.max(1, timeoutMs - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos));
-                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, (int) remainingMs,
-                            bTypedesc);
-                } finally {
-                    txLock.unlock();
-                }
-            });
+            Object result = CommonUtils.executeBlocking(env, () -> txLock == null
+                    ? receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, timeoutMs, false, bTypedesc)
+                    : receiveInTransaction(txLock, timeoutMs, waitMs -> receiveOne(consumer, subscriptionType,
+                            flowReceiver, xmlConsumer, waitMs, false, bTypedesc), consumer));
 
             if (result == CONSUMER_CLOSED) {
                 return consumerClosedError();
@@ -267,7 +258,7 @@ public class ConsumerActions {
             reportReceiveOutcome(consumer, result);
             return result;
         } catch (CommonUtils.StrandCancelledException e) {
-            requeueCancelledReceive(consumer, e.taskResult());
+            handleCancelledReceive(consumer, e.taskResult());
             throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
@@ -276,11 +267,10 @@ public class ConsumerActions {
     }
 
     /**
-     * Takes one message and converts it, waiting up to {@code waitMs} milliseconds: 0 waits indefinitely and
-     * {@link #NO_WAIT} does not wait.
+     * Takes one message and converts it, waiting up to {@code waitMs} milliseconds (0 waits indefinitely).
      */
     private static Object receiveOne(BObject consumer, String subscriptionType, FlowReceiver flowReceiver,
-                                     XMLMessageConsumer xmlConsumer, int waitMs, BTypedesc bTypedesc) {
+                                     XMLMessageConsumer xmlConsumer, int waitMs, boolean noWait, BTypedesc bTypedesc) {
         BytesXMLMessage message = null;
         try {
             if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
@@ -289,18 +279,18 @@ public class ConsumerActions {
                     return isClosing(consumer) ? CONSUMER_CLOSED
                             : CommonUtils.createError("Consumer flow not initialized");
                 }
-                message = waitMs == NO_WAIT ? flowReceiver.receiveNoWait() : flowReceiver.receive(waitMs);
+                message = noWait ? flowReceiver.receiveNoWait() : flowReceiver.receive(waitMs);
             } else if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(subscriptionType)) {
                 if (xmlConsumer == null) {
                     return isClosing(consumer) ? CONSUMER_CLOSED : CommonUtils.createError("Consumer not initialized");
                 }
-                message = waitMs == NO_WAIT ? xmlConsumer.receiveNoWait() : xmlConsumer.receive(waitMs);
+                message = noWait ? xmlConsumer.receiveNoWait() : xmlConsumer.receive(waitMs);
             }
         } catch (Exception e) {
             return new ReceiveFailure(e);
         }
         if (message == null) {
-            if (waitMs != NO_WAIT) {
+            if (!noWait) {
                 return emptyReceiveResult(consumer);
             }
             return isClosing(consumer) ? CONSUMER_CLOSED : null;
@@ -319,19 +309,62 @@ public class ConsumerActions {
     }
 
     /**
-     * Returns a message that a cancelled strand had already received to the queue, so the broker redelivers it. Only a
-     * non-transacted CLIENT_ACK flow can do this: AUTO_ACK has acknowledged the message, and on a transacted consumer
-     * it stays in the transaction.
+     * Receives on a transacted session in short slices, holding its lock only during each slice, so another strand's
+     * commit or rollback waits at most one slice. A timeout of 0 waits indefinitely.
+     */
+    private static Object receiveInTransaction(ReentrantLock txLock, int timeoutMs, IntFunction<Object> receive,
+                                               BObject consumer) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        while (true) {
+            long remainingMs = timeoutMs == 0 ? TRANSACTED_RECEIVE_SLICE_MS
+                    : TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+            if (remainingMs <= 0) {
+                return emptyReceiveResult(consumer);
+            }
+            int sliceMs = (int) Math.min(remainingMs, TRANSACTED_RECEIVE_SLICE_MS);
+            if (!txLock.tryLock(sliceMs, TimeUnit.MILLISECONDS)) {
+                continue;
+            }
+            Object result;
+            try {
+                result = receive.apply(sliceMs);
+            } finally {
+                txLock.unlock();
+            }
+            if (result != null) {
+                return result;
+            }
+        }
+    }
+
+    /**
+     * Handles a message that a cancelled strand had already received: a non-transacted CLIENT_ACK flow returns it to
+     * the queue for redelivery; otherwise it was acknowledged on receipt, or stays in the transaction, and is logged.
      */
     @SuppressWarnings("unchecked")
-    private static void requeueCancelledReceive(BObject consumer, Object taskResult) {
-        if (!(taskResult instanceof BMap<?, ?> received)
-                || !Boolean.TRUE.equals(consumer.getNativeData(NATIVE_SETTLE_UNDELIVERED))) {
+    private static void handleCancelledReceive(BObject consumer, Object taskResult) {
+        if (!(taskResult instanceof BMap<?, ?> received)) {
             return;
         }
         XMLMessage message = MessageConverter.extractNativeMessage((BMap<BString, Object>) received);
-        if (message != null) {
-            CommonUtils.closeQuietly(() -> message.settle(XMLMessage.Outcome.FAILED));
+        if (message == null) {
+            return;
+        }
+        if (!Boolean.TRUE.equals(consumer.getNativeData(NATIVE_SETTLE_UNDELIVERED))) {
+            String fate = consumer.getNativeData(NATIVE_TX_SESSION) != null
+                    ? "it stays in the transaction and is settled by the next commit or rollback"
+                    : "it was already acknowledged";
+            LOGGER.warning("A receive was cancelled after it took message " + message.getMessageId() + "; " + fate
+                    + ".");
+            return;
+        }
+        try {
+            message.settle(XMLMessage.Outcome.FAILED);
+            SolaceMetricsUtil.reportNack(consumer, true);
+        } catch (Exception e) {
+            SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_NACK);
+            LOGGER.warning("Failed to return message " + message.getMessageId()
+                    + " taken by a cancelled receive to the queue: " + e.getMessage());
         }
     }
 
@@ -423,14 +456,14 @@ public class ConsumerActions {
         try {
             Object result = CommonUtils.executeBlocking(env, () -> {
                 if (txLock == null) {
-                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, NO_WAIT, bTypedesc);
+                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, 0, true, bTypedesc);
                 }
                 // A receive or commit in progress on the transacted session means no message is available now.
                 if (!txLock.tryLock()) {
                     return null;
                 }
                 try {
-                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, NO_WAIT, bTypedesc);
+                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, 0, true, bTypedesc);
                 } finally {
                     txLock.unlock();
                 }
@@ -453,7 +486,7 @@ public class ConsumerActions {
             reportReceiveOutcome(consumer, result);
             return result;
         } catch (CommonUtils.StrandCancelledException e) {
-            requeueCancelledReceive(consumer, e.taskResult());
+            handleCancelledReceive(consumer, e.taskResult());
             throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);

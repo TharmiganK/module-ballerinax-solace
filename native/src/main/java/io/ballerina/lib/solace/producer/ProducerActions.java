@@ -145,7 +145,7 @@ public class ProducerActions {
             // Store session references in native data
             producer.addNativeData(NATIVE_SESSION, session);
             producer.addNativeData(NATIVE_TX_SESSION, txSession);
-            producer.addNativeData(NATIVE_TX_LOCK, txSession != null ? new ReentrantLock() : null);
+            producer.addNativeData(NATIVE_TX_LOCK, txSession != null ? new ReentrantLock(true) : null);
             producer.addNativeData(NATIVE_TRANSACTED, isTransacted);
             producer.addNativeData(NATIVE_PRODUCER, xmlProducer);
             producer.addNativeData(NATIVE_CLOSED, false);

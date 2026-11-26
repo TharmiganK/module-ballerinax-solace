@@ -157,7 +157,8 @@ public class CommonUtils {
             });
         } catch (BError panic) {
             if (!ran.get()) {
-                close.get();
+                // The strand still holds the lock shared by non-isolated strands here, so close off the strand.
+                Thread.ofVirtual().start(close::get);
             }
             throw panic;
         }

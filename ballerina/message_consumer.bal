@@ -77,7 +77,8 @@ public isolated client class MessageConsumer {
     # On brokers before 10.25.10, or on a queue set to respect DMQ eligibility, only a message the publisher marked
     # DMQ-eligible moves there.
     #
-    # + timeout - Maximum time in seconds to wait for a message. A nil or zero timeout never expires
+    # + timeout - Maximum time in seconds to wait for a message. A nil or zero timeout never expires, and a negative
+    # timeout returns an `Error`
     # + T - Optional type description of the expected message type; declare a narrowed
     # `record {|*Message; T payload;|}` to have the payload data-bound into `T`
     # + return - The received message, nil on an active-flow timeout, or an Error
