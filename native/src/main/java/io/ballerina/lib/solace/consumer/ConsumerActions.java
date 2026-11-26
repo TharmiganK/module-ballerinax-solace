@@ -48,6 +48,7 @@ import io.ballerina.runtime.api.values.BTypedesc;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSED;
@@ -91,6 +92,7 @@ public class ConsumerActions {
     private static final String FLOW_DOWN_ERROR = "FlowDownError";
     // Returned by a receive task that the consumer's close ended, so the caller does not count it as a receive error.
     private static final Object CONSUMER_CLOSED = new Object();
+    private static final int NO_WAIT = -1;
 
     /**
      * Initialize the consumer with connection URL and configuration. Creates either a transacted or non-transacted
@@ -220,45 +222,27 @@ public class ConsumerActions {
         XMLMessageConsumer xmlConsumer = (XMLMessageConsumer) consumer.getNativeData(NATIVE_CONSUMER);
         ReentrantLock txLock = (ReentrantLock) consumer.getNativeData(NATIVE_TX_LOCK);
         try {
-            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, () -> {
-                BytesXMLMessage message = null;
-                if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
-                        SUBSCRIPTION_TYPE_DURABLE_TOPIC.equals(subscriptionType)) {
-                    if (flowReceiver == null) {
-                        return isClosing(consumer) ? CONSUMER_CLOSED
-                                : CommonUtils.createError("Consumer flow not initialized");
-                    }
-                    try {
-                        message = flowReceiver.receive((int) timeoutMs);
-                    } catch (Exception e) {
-                        return new ReceiveFailure(e);
-                    }
-                } else if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(subscriptionType)) {
-                    if (xmlConsumer == null) {
-                        return isClosing(consumer) ? CONSUMER_CLOSED
-                                : CommonUtils.createError("Consumer not initialized");
-                    }
-                    try {
-                        message = xmlConsumer.receive((int) timeoutMs);
-                    } catch (Exception e) {
-                        return new ReceiveFailure(e);
-                    }
+            Object result = CommonUtils.executeBlocking(env, () -> {
+                if (txLock == null) {
+                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, (int) timeoutMs,
+                            bTypedesc);
                 }
-                if (message == null) {
+                // Wait for the transacted session only as long as this receive may wait, then receive for the rest.
+                long startNanos = System.nanoTime();
+                if (timeoutMs <= 0) {
+                    txLock.lock();
+                } else if (!txLock.tryLock(timeoutMs, TimeUnit.MILLISECONDS)) {
                     return emptyReceiveResult(consumer);
                 }
                 try {
-                    return MessageConverter.toBallerinaMessage(message, bTypedesc);
-                } catch (BallerinaSolaceDatabindingException e) {
-                    return settleUndelivered(consumer, message, XMLMessage.Outcome.REJECTED,
-                            CommonUtils.createError(e.getMessage()));
-                } catch (Throwable t) {
-                    // Converting the same message fails the same way, so only a JVM Error is requeued.
-                    return settleUndelivered(consumer, message,
-                            t instanceof Exception ? XMLMessage.Outcome.REJECTED : XMLMessage.Outcome.FAILED,
-                            CommonUtils.createError("Failed to receive message", t));
+                    long remainingMs = timeoutMs <= 0 ? 0
+                            : Math.max(1, timeoutMs - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos));
+                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, (int) remainingMs,
+                            bTypedesc);
+                } finally {
+                    txLock.unlock();
                 }
-            }));
+            });
 
             if (result == CONSUMER_CLOSED) {
                 return consumerClosedError();
@@ -283,10 +267,71 @@ public class ConsumerActions {
             reportReceiveOutcome(consumer, result);
             return result;
         } catch (CommonUtils.StrandCancelledException e) {
+            requeueCancelledReceive(consumer, e.taskResult());
             throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
             return CommonUtils.createError("Failed to receive message", e);
+        }
+    }
+
+    /**
+     * Takes one message and converts it, waiting up to {@code waitMs} milliseconds: 0 waits indefinitely and
+     * {@link #NO_WAIT} does not wait.
+     */
+    private static Object receiveOne(BObject consumer, String subscriptionType, FlowReceiver flowReceiver,
+                                     XMLMessageConsumer xmlConsumer, int waitMs, BTypedesc bTypedesc) {
+        BytesXMLMessage message = null;
+        try {
+            if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
+                    SUBSCRIPTION_TYPE_DURABLE_TOPIC.equals(subscriptionType)) {
+                if (flowReceiver == null) {
+                    return isClosing(consumer) ? CONSUMER_CLOSED
+                            : CommonUtils.createError("Consumer flow not initialized");
+                }
+                message = waitMs == NO_WAIT ? flowReceiver.receiveNoWait() : flowReceiver.receive(waitMs);
+            } else if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(subscriptionType)) {
+                if (xmlConsumer == null) {
+                    return isClosing(consumer) ? CONSUMER_CLOSED : CommonUtils.createError("Consumer not initialized");
+                }
+                message = waitMs == NO_WAIT ? xmlConsumer.receiveNoWait() : xmlConsumer.receive(waitMs);
+            }
+        } catch (Exception e) {
+            return new ReceiveFailure(e);
+        }
+        if (message == null) {
+            if (waitMs != NO_WAIT) {
+                return emptyReceiveResult(consumer);
+            }
+            return isClosing(consumer) ? CONSUMER_CLOSED : null;
+        }
+        try {
+            return MessageConverter.toBallerinaMessage(message, bTypedesc);
+        } catch (BallerinaSolaceDatabindingException e) {
+            return settleUndelivered(consumer, message, XMLMessage.Outcome.REJECTED,
+                    CommonUtils.createError(e.getMessage()));
+        } catch (Throwable t) {
+            // Converting the same message fails the same way, so only a JVM Error is requeued.
+            return settleUndelivered(consumer, message,
+                    t instanceof Exception ? XMLMessage.Outcome.REJECTED : XMLMessage.Outcome.FAILED,
+                    CommonUtils.createError("Failed to receive message", t));
+        }
+    }
+
+    /**
+     * Returns a message that a cancelled strand had already received to the queue, so the broker redelivers it. Only a
+     * non-transacted CLIENT_ACK flow can do this: AUTO_ACK has acknowledged the message, and on a transacted consumer
+     * it stays in the transaction.
+     */
+    @SuppressWarnings("unchecked")
+    private static void requeueCancelledReceive(BObject consumer, Object taskResult) {
+        if (!(taskResult instanceof BMap<?, ?> received)
+                || !Boolean.TRUE.equals(consumer.getNativeData(NATIVE_SETTLE_UNDELIVERED))) {
+            return;
+        }
+        XMLMessage message = MessageConverter.extractNativeMessage((BMap<BString, Object>) received);
+        if (message != null) {
+            CommonUtils.closeQuietly(() -> message.settle(XMLMessage.Outcome.FAILED));
         }
     }
 
@@ -376,40 +421,30 @@ public class ConsumerActions {
         XMLMessageConsumer xmlConsumer = (XMLMessageConsumer) consumer.getNativeData(NATIVE_CONSUMER);
         ReentrantLock txLock = (ReentrantLock) consumer.getNativeData(NATIVE_TX_LOCK);
         try {
-            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, () -> {
-                BytesXMLMessage message = null;
-                if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
-                        SUBSCRIPTION_TYPE_DURABLE_TOPIC.equals(subscriptionType)) {
-                    if (flowReceiver == null) {
-                        return isClosing(consumer) ? CONSUMER_CLOSED
-                                : CommonUtils.createError("Consumer flow not initialized");
-                    }
-                    message = flowReceiver.receiveNoWait();
-                } else if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(subscriptionType)) {
-                    if (xmlConsumer == null) {
-                        return isClosing(consumer) ? CONSUMER_CLOSED
-                                : CommonUtils.createError("Consumer not initialized");
-                    }
-                    message = xmlConsumer.receiveNoWait();
+            Object result = CommonUtils.executeBlocking(env, () -> {
+                if (txLock == null) {
+                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, NO_WAIT, bTypedesc);
                 }
-                if (message == null) {
+                // A receive or commit in progress on the transacted session means no message is available now.
+                if (!txLock.tryLock()) {
                     return null;
                 }
                 try {
-                    return MessageConverter.toBallerinaMessage(message, bTypedesc);
-                } catch (BallerinaSolaceDatabindingException e) {
-                    return settleUndelivered(consumer, message, XMLMessage.Outcome.REJECTED,
-                            CommonUtils.createError(e.getMessage()));
-                } catch (Throwable t) {
-                    // Converting the same message fails the same way, so only a JVM Error is requeued.
-                    return settleUndelivered(consumer, message,
-                            t instanceof Exception ? XMLMessage.Outcome.REJECTED : XMLMessage.Outcome.FAILED,
-                            CommonUtils.createError("Failed to receive message", t));
+                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, NO_WAIT, bTypedesc);
+                } finally {
+                    txLock.unlock();
                 }
-            }));
+            });
 
             if (result == CONSUMER_CLOSED) {
                 return consumerClosedError();
+            }
+            if (result instanceof ReceiveFailure failure) {
+                if (isClosing(consumer)) {
+                    return consumerClosedError();
+                }
+                SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
+                return CommonUtils.createError("Failed to receive message", failure.cause());
             }
             if (result instanceof BError bError) {
                 SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
@@ -418,6 +453,7 @@ public class ConsumerActions {
             reportReceiveOutcome(consumer, result);
             return result;
         } catch (CommonUtils.StrandCancelledException e) {
+            requeueCancelledReceive(consumer, e.taskResult());
             throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);

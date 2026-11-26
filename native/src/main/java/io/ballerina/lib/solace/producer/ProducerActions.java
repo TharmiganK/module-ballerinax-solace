@@ -218,6 +218,7 @@ public class ProducerActions {
         SolaceTracingUtil.traceResourceInvocation(env, producer, destinationName);
         PublishAcknowledgementTracker tracker = null;
         Long correlationKey = null;
+        boolean sent = false;
         try {
             XMLMessageProducer xmlProducer = (XMLMessageProducer) producer.getNativeData(NATIVE_PRODUCER);
             if (xmlProducer == null) {
@@ -272,6 +273,7 @@ public class ProducerActions {
                 SolaceMetricsUtil.reportProducerError(producer, destinationName, destinationKind, ERROR_TYPE_PUBLISH);
                 return CommonUtils.createError(bError.getMessage());
             }
+            sent = true;
 
             if (awaitedPublish != null) {
                 final PublishAcknowledgementTracker finalTracker = tracker;
@@ -291,8 +293,10 @@ public class ProducerActions {
                     elapsedNanos);
             return null;
         } catch (CommonUtils.StrandCancelledException e) {
-            // The send may not have run, so a registered key would otherwise hold close() for its drain timeout.
-            if (tracker != null && correlationKey != null) {
+            // A key whose message was never sent would hold close() for its drain timeout. A sent message keeps its
+            // key, so a later broker rejection is still reported by close().
+            boolean messageSent = sent || (e.taskCompleted() && !(e.taskResult() instanceof BError));
+            if (tracker != null && correlationKey != null && !messageSent) {
                 tracker.cancel(correlationKey);
             }
             throw e.panic();

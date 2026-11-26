@@ -39,9 +39,10 @@
         <Bug pattern="THROWS_METHOD_THROWS_CLAUSE_BASIC_EXCEPTION"/>
     </Match>
 
-    <!-- StrandCancelledException exposes the runtime's cancellation panic so callers can rethrow it unchanged. -->
+    <!-- StrandCancelledException exposes the runtime's cancellation panic and the task's result so callers can rethrow
+         the panic unchanged and undo the task's effect. It is never serialized. -->
     <Match>
         <Class name="io.ballerina.lib.solace.common.CommonUtils$StrandCancelledException"/>
-        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2,SE_TRANSIENT_FIELD_NOT_RESTORED"/>
     </Match>
 </FindBugsFilter>

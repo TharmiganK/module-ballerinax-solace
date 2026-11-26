@@ -29,6 +29,7 @@ import io.ballerina.runtime.api.values.BString;
 
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
@@ -90,17 +91,24 @@ public class CommonUtils {
     }
 
     public static Object executeBlocking(Environment env, CompletableWithException task) {
+        AtomicBoolean completed = new AtomicBoolean();
+        AtomicReference<Object> taskResult = new AtomicReference<>();
         try {
             return env.yieldAndRun(() -> {
+                Object result;
                 try {
-                    return task.run();
+                    result = task.run();
                 } catch (Exception e) {
-                    return createError("Error during blocking operation", e);
+                    result = createError("Error during blocking operation", e);
                 }
+                taskResult.set(result);
+                completed.set(true);
+                return result;
             });
         } catch (BError panic) {
-            // The task's own failures are returned above, so this is the runtime cancelling the strand.
-            throw new StrandCancelledException(panic);
+            // The task's own failures are returned above, so this is the runtime cancelling the strand. The runtime
+            // raises it once the task has finished, if the task started at all.
+            throw new StrandCancelledException(panic, completed.get(), taskResult.get());
         }
     }
 
@@ -160,14 +168,32 @@ public class CommonUtils {
      */
     public static final class StrandCancelledException extends RuntimeException {
         private final BError panic;
+        private final boolean taskCompleted;
+        private final transient Object taskResult;
 
-        StrandCancelledException(BError panic) {
+        StrandCancelledException(BError panic, boolean taskCompleted, Object taskResult) {
             super(panic);
             this.panic = panic;
+            this.taskCompleted = taskCompleted;
+            this.taskResult = taskResult;
         }
 
         public BError panic() {
             return panic;
+        }
+
+        /**
+         * Whether the blocking task ran to completion before the cancellation was raised.
+         */
+        public boolean taskCompleted() {
+            return taskCompleted;
+        }
+
+        /**
+         * The blocking task's result, such as a message it received, or null if it did not complete.
+         */
+        public Object taskResult() {
+            return taskResult;
         }
     }
 

@@ -68,7 +68,8 @@ public isolated client class MessageConsumer {
     #
     # Blocks up to the specified timeout waiting for a message. Returns nil if an active flow is empty,
     # `InactiveFlowError` if the flow is inactive, or `FlowDownError` if it is down. On a transacted consumer, a
-    # `commit` or `rollback` from another strand waits until this returns.
+    # `commit` or `rollback` from another strand waits until this returns, and the timeout includes any wait for
+    # another strand's call on the transaction.
     #
     # If the message cannot be converted or bound to `T`, an `Error` is returned. For a non-transacted `CLIENT_ACK`
     # consumer on a queue or durable topic endpoint, the message is also rejected, because it is never returned to be
@@ -87,7 +88,8 @@ public isolated client class MessageConsumer {
     # Receive a message without waiting.
     #
     # Returns immediately with a message if available, or nil if no message is available.
-    # This is a non-blocking operation.
+    # This is a non-blocking operation. On a transacted consumer it also returns nil while another strand's `receive`,
+    # `commit` or `rollback` is using the transaction.
     #
     # If the message cannot be converted or bound to `T`, an `Error` is returned. For a non-transacted `CLIENT_ACK`
     # consumer on a queue or durable topic endpoint, the message is also rejected, because it is never returned to be

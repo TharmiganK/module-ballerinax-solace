@@ -985,3 +985,52 @@ function assertCloseEndsWaitingReceive(MessageConsumer consumer) returns error? 
     test:assertEquals(result.message(), "Consumer is closed");
     test:assertTrue(elapsed < 10d, string `receive returned ${elapsed} s after close`);
 }
+
+@test:Config {groups: ["consumer", "concurrency"]}
+function testCancelledReceiveRequeuesTheMessage() returns error? {
+    MessageConsumer consumer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+        subscriptionConfig: {queueName: CONSUMER_CANCEL_QUEUE, ackMode: CLIENT_ACK}
+    });
+    future<Message|Error?> pending = start receiveOnNonIsolatedStrand(consumer, 30);
+    runtime:sleep(0.5);
+    pending.cancel();
+    // The cancellation is raised once the waiting receive takes this message, which must then go back to the queue.
+    check publish({queueName: CONSUMER_CANCEL_QUEUE}, "cancelled-receive-payload", PERSISTENT);
+    runtime:sleep(1);
+
+    StringPayloadMessage? redelivered = check consumer->receive(5);
+    if redelivered is StringPayloadMessage {
+        check consumer->ack(redelivered);
+    }
+    check consumer->close();
+    test:assertTrue(redelivered is StringPayloadMessage,
+            "A message taken by a cancelled receive should be redelivered on the same consumer");
+}
+
+@test:Config {groups: ["consumer", "transacted", "concurrency"]}
+function testTransactedReceiveKeepsItsTimeoutWhileAnotherWaits() returns error? {
+    MessageConsumer consumer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        transacted: true,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+        subscriptionConfig: {queueName: CONSUMER_TX_CONCURRENCY_QUEUE}
+    });
+    future<Message|Error?> waiting = start receiveOnNonIsolatedStrand(consumer, 6);
+    runtime:sleep(0.5);
+
+    decimal startedAt = time:monotonicNow();
+    Message? noWait = check consumer->receiveNoWait();
+    decimal noWaitElapsed = time:monotonicNow() - startedAt;
+    startedAt = time:monotonicNow();
+    Message? timed = check consumer->receive(1);
+    decimal timedElapsed = time:monotonicNow() - startedAt;
+
+    Message|Error? waited = wait waiting;
+    check consumer->close();
+    test:assertTrue(noWait is () && timed is () && waited is (), "The queue is empty");
+    test:assertTrue(noWaitElapsed < 1d, string `receiveNoWait waited ${noWaitElapsed} s for the other receive`);
+    test:assertTrue(timedElapsed < 3d, string `receive(1) took ${timedElapsed} s while another receive waited`);
+}
+
