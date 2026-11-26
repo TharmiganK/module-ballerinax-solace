@@ -278,14 +278,16 @@ public class ProducerActions {
             sent = true;
 
             if (awaitedPublish != null) {
-                final PublishAcknowledgementTracker finalTracker = tracker;
                 final PublishAcknowledgementTracker.AwaitedPublish finalAwaitedPublish = awaitedPublish;
                 Object acknowledgementResult = CommonUtils.executeBlocking(env, () -> awaitAcknowledgement(
-                        finalTracker, finalAwaitedPublish, acknowledgementTimeout, destinationName));
+                        finalAwaitedPublish, acknowledgementTimeout, destinationName));
                 if (acknowledgementResult instanceof BError acknowledgementError) {
-                    // Claimed only now that the caller gets the rejection; a cancelled wait leaves it for close().
+                    // Settled only now that the caller gets the error; a cancelled wait leaves the publish to close().
                     if (PUBLISH_REJECTED_ERROR.equals(acknowledgementError.getType().getName())) {
                         tracker.claimRejection(awaitedPublish.key());
+                    } else {
+                        // A timeout or interrupt leaves the outcome unknown, so it is not reported again on close.
+                        tracker.cancel(awaitedPublish.key());
                     }
                     SolaceMetricsUtil.reportProducerError(producer, destinationName, destinationKind,
                             ERROR_TYPE_PUBLISH);
@@ -325,15 +327,12 @@ public class ProducerActions {
      *
      * @return null if the broker acknowledged the message, otherwise the error to return from the send
      */
-    private static BError awaitAcknowledgement(PublishAcknowledgementTracker tracker,
-                                               PublishAcknowledgementTracker.AwaitedPublish awaitedPublish,
+    private static BError awaitAcknowledgement(PublishAcknowledgementTracker.AwaitedPublish awaitedPublish,
                                                Duration timeout, String destinationName) {
         try {
             awaitedPublish.confirmation().get(timeout.toMillis(), TimeUnit.MILLISECONDS);
             return null;
         } catch (TimeoutException e) {
-            // The outcome is unknown, so stop tracking the message instead of reporting it again on close
-            tracker.cancel(awaitedPublish.key());
             return CommonUtils.createError(String.format(
                     "Timed out after %d ms waiting for the broker to acknowledge the message published to '%s'",
                     timeout.toMillis(), destinationName));
@@ -348,7 +347,6 @@ public class ProducerActions {
                     "Failed to confirm the message published to '%s'", destinationName), cause);
         } catch (InterruptedException e) {
             // Reported as an error; the flag is not restored because this runs on the calling strand's thread.
-            tracker.cancel(awaitedPublish.key());
             return CommonUtils.createError(String.format(
                     "Interrupted while waiting for the broker to acknowledge the message published to '%s'",
                     destinationName), e);
