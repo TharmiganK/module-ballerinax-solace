@@ -46,9 +46,9 @@ public isolated client class Caller {
     #
     # + message - The message to negatively acknowledge
     # + requeue - If true, the message is requeued for redelivery (FAILED outcome).
-    # If false, the message is rejected (REJECTED outcome): it moves to the queue's dead message queue if one is
-    # assigned and exists, and is discarded otherwise. On brokers before 10.25.10, or on a queue set to respect DMQ
-    # eligibility, only a message the publisher marked DMQ-eligible moves there.
+    # If false, the message is rejected (REJECTED outcome): it moves to the queue's dead message queue if the broker's
+    # [DMQ settings](https://docs.solace.com/Messaging/Guaranteed-Msg/Setting-Dead-Msg-Queues.htm) route it there,
+    # and is discarded otherwise.
     # + return - Error if NACK fails
     isolated remote function nack(Message message, boolean requeue = true) returns Error? = @java:Method {
         'class: "io.ballerina.lib.solace.caller.CallerActions"

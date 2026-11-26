@@ -73,9 +73,9 @@ public isolated client class MessageConsumer {
     #
     # If the message cannot be converted or bound to `T`, an `Error` is returned. For a non-transacted `CLIENT_ACK`
     # consumer on a queue or durable topic endpoint, the message is also rejected, because it is never returned to be
-    # settled. It moves to the queue's dead message queue if one is assigned and exists, and is discarded otherwise.
-    # On brokers before 10.25.10, or on a queue set to respect DMQ eligibility, only a message the publisher marked
-    # DMQ-eligible moves there.
+    # settled. It moves to the queue's dead message queue if the broker's
+    # [DMQ settings](https://docs.solace.com/Messaging/Guaranteed-Msg/Setting-Dead-Msg-Queues.htm) route it there,
+    # and is discarded otherwise.
     #
     # + timeout - Maximum time in seconds to wait for a message. A nil or zero timeout never expires, and a negative
     # timeout returns an `Error`
@@ -94,9 +94,9 @@ public isolated client class MessageConsumer {
     #
     # If the message cannot be converted or bound to `T`, an `Error` is returned. For a non-transacted `CLIENT_ACK`
     # consumer on a queue or durable topic endpoint, the message is also rejected, because it is never returned to be
-    # settled. It moves to the queue's dead message queue if one is assigned and exists, and is discarded otherwise.
-    # On brokers before 10.25.10, or on a queue set to respect DMQ eligibility, only a message the publisher marked
-    # DMQ-eligible moves there.
+    # settled. It moves to the queue's dead message queue if the broker's
+    # [DMQ settings](https://docs.solace.com/Messaging/Guaranteed-Msg/Setting-Dead-Msg-Queues.htm) route it there,
+    # and is discarded otherwise.
     #
     # + T - Optional type description of the expected message type; declare a narrowed
     # `record {|*Message; T payload;|}` to have the payload data-bound into `T`

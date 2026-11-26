@@ -51,10 +51,10 @@ public enum AcknowledgementMode {
     # and redelivered until the queue's maximum redelivery count is reached. The broker's default count is
     # unlimited, so configure a finite count to stop a message that always fails from being redelivered
     # indefinitely. A message that cannot be bound to the declared `onMessage` parameter type is rejected. A
-    # rejected or redelivery-exhausted message moves to the queue's dead message queue if one is assigned and
-    # exists, and the broker discards it otherwise. On brokers before 10.25.10, or on a queue set to respect DMQ
-    # eligibility, only a message the publisher marked DMQ-eligible moves there. Messages received on a direct
-    # topic subscription are neither acknowledged nor redelivered.
+    # rejected or redelivery-exhausted message moves to the queue's dead message queue if the broker's
+    # [DMQ settings](https://docs.solace.com/Messaging/Guaranteed-Msg/Setting-Dead-Msg-Queues.htm) route it there,
+    # and the broker discards it otherwise. Messages received on a direct topic subscription are neither acknowledged
+    # nor redelivered.
     # For a `solace:MessageConsumer`, the message is acknowledged when it is received.
     AUTO_ACK,
     # The message must be settled explicitly using `ack` or `nack`. For a `solace:Listener` service on a queue or
