@@ -45,6 +45,8 @@ import io.ballerina.runtime.api.values.BString;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -220,6 +222,7 @@ public class ProducerActions {
         SolaceTracingUtil.traceResourceInvocation(env, producer, destinationName);
         PublishAcknowledgementTracker tracker = null;
         Long correlationKey = null;
+        PublishAcknowledgementTracker.AwaitedPublish awaitedPublish = null;
         boolean sent = false;
         try {
             XMLMessageProducer xmlProducer = (XMLMessageProducer) producer.getNativeData(NATIVE_PRODUCER);
@@ -245,7 +248,6 @@ public class ProducerActions {
                     DestinationConverter.fromDestinationInterface(destination);
 
             tracker = (PublishAcknowledgementTracker) producer.getNativeData(NATIVE_PUBLISH_ACK_TRACKER);
-            PublishAcknowledgementTracker.AwaitedPublish awaitedPublish = null;
             if (tracker != null && jcsmpMessage.getDeliveryMode() != com.solacesystems.jcsmp.DeliveryMode.DIRECT) {
                 try {
                     if (acknowledgementTimeout != null) {
@@ -300,11 +302,7 @@ public class ProducerActions {
             boolean messageSent = sent || (e.taskCompleted() && !(e.taskResult() instanceof BError));
             if (tracker != null && correlationKey != null) {
                 if (messageSent) {
-                    tracker.detachAwaiter(correlationKey);
-                    if (e.taskResult() instanceof BError rejection
-                            && PUBLISH_REJECTED_ERROR.equals(rejection.getType().getName())) {
-                        tracker.recordRejection(rejection.getMessage());
-                    }
+                    keepCancelledPublishTracked(tracker, correlationKey, awaitedPublish);
                 } else {
                     tracker.cancel(correlationKey);
                 }
@@ -351,6 +349,24 @@ public class ProducerActions {
             return CommonUtils.createError(String.format(
                     "Interrupted while waiting for the broker to acknowledge the message published to '%s'",
                     destinationName), e);
+        }
+    }
+
+    /**
+     * Keeps a sent message tracked after its strand is cancelled, so {@code close()} reports a rejection the cancelled
+     * awaiter can no longer return, including one that settled just before the awaiter was detached.
+     */
+    private static void keepCancelledPublishTracked(PublishAcknowledgementTracker tracker, long key,
+                                                    PublishAcknowledgementTracker.AwaitedPublish awaitedPublish) {
+        if (awaitedPublish == null || tracker.detachAwaiter(key)) {
+            return;
+        }
+        try {
+            awaitedPublish.confirmation().join();
+        } catch (CompletionException | CancellationException e) {
+            if (e.getCause() instanceof JCSMPException rejection) {
+                tracker.recordRejection(rejection.getMessage());
+            }
         }
     }
 
@@ -515,15 +531,17 @@ public class ProducerActions {
             }
         }
 
-        // Attempt to close every resource independently so one failure doesn't block the rest.
-        if (xmlProducer != null) {
-            Exception e = CommonUtils.attemptClose(xmlProducer::close);
-            firstError = firstError == null ? e : firstError;
-        }
-        if (txSession != null) {
-            Exception e = CommonUtils.attemptClose(txSession::close);
-            firstError = firstError == null ? e : firstError;
-        }
+        // Attempt to close every resource independently so one failure doesn't block the rest. A transacted producer
+        // and session must be used serially, so wait for the send or commit in progress.
+        ReentrantLock txLock = (ReentrantLock) producer.getNativeData(NATIVE_TX_LOCK);
+        Exception closeError = CommonUtils.attemptClose(CommonUtils.serialized(txLock, () -> {
+            Exception producerError = xmlProducer != null ? CommonUtils.attemptClose(xmlProducer::close) : null;
+            Exception txError = txSession != null ? CommonUtils.attemptClose(txSession::close) : null;
+            if (producerError != null || txError != null) {
+                throw producerError != null ? producerError : txError;
+            }
+        }));
+        firstError = firstError == null ? closeError : firstError;
         if (session != null) {
             Exception e = CommonUtils.attemptClose(session::closeSession);
             firstError = firstError == null ? e : firstError;

@@ -120,10 +120,6 @@ final class PublishAcknowledgementTracker {
     }
 
     /**
-     * Stops waiting for a sent message's confirmation while keeping it tracked, so a later rejection is counted for
-     * {@code close()} like a plain send's.
-     */
-    /**
      * Counts a rejection that an awaiter received but could not report, so {@code close()} reports it.
      */
     void recordRejection(String message) {
@@ -138,10 +134,13 @@ final class PublishAcknowledgementTracker {
         }
     }
 
-    void detachAwaiter(long key) {
+    /**
+     * Returns false if the message was already settled, in which case its confirmation carries the outcome.
+     */
+    boolean detachAwaiter(long key) {
         lock.lock();
         try {
-            confirmations.remove(key);
+            return confirmations.remove(key) != null;
         } finally {
             lock.unlock();
         }

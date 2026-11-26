@@ -323,8 +323,7 @@ public class ConsumerActions {
                                                BObject consumer) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (true) {
-            long remainingMs = timeoutMs == 0 ? TRANSACTED_RECEIVE_SLICE_MS
-                    : TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+            long remainingMs = timeoutMs == 0 ? TRANSACTED_RECEIVE_SLICE_MS : millisUntil(deadline);
             if (remainingMs <= 0) {
                 return emptyReceiveResult(consumer);
             }
@@ -333,8 +332,7 @@ public class ConsumerActions {
             }
             Object result;
             try {
-                long leftMs = timeoutMs == 0 ? TRANSACTED_RECEIVE_SLICE_MS
-                        : TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+                long leftMs = timeoutMs == 0 ? TRANSACTED_RECEIVE_SLICE_MS : millisUntil(deadline);
                 if (leftMs <= 0) {
                     return emptyReceiveResult(consumer);
                 }
@@ -346,6 +344,12 @@ public class ConsumerActions {
                 return result;
             }
         }
+    }
+
+    // Rounds up, so a budget below 1 ms still polls the flow once.
+    private static long millisUntil(long deadlineNanos) {
+        long nanos = deadlineNanos - System.nanoTime();
+        return nanos <= 0 ? 0 : (nanos + 999_999) / 1_000_000;
     }
 
     /**
@@ -720,16 +724,12 @@ public class ConsumerActions {
         }
     }
 
-    private static BError closeConsumerResources(BObject consumer) {
-        // Set before closing so a receive woken by the close reports "Consumer is closed".
-        consumer.addNativeData(NATIVE_CLOSING, true);
-        String subscriptionType = (String) consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE);
-        FlowReceiver flowReceiver = (FlowReceiver) consumer.getNativeData(NATIVE_FLOW);
-        XMLMessageConsumer xmlConsumer = (XMLMessageConsumer) consumer.getNativeData(NATIVE_CONSUMER);
-        TransactedSession txSession = (TransactedSession) consumer.getNativeData(NATIVE_TX_SESSION);
-        JCSMPSession session = (JCSMPSession) consumer.getNativeData(NATIVE_SESSION);
-
-        // Attempt to close every resource independently so one failure doesn't block the rest.
+    /**
+     * Closes the flow or direct consumer and then the transacted session, each attempted even if the last one failed.
+     */
+    private static void closeReceiverAndTransaction(String subscriptionType, FlowReceiver flowReceiver,
+                                                    XMLMessageConsumer xmlConsumer, TransactedSession txSession)
+            throws Exception {
         Exception firstError = null;
         if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
                 SUBSCRIPTION_TYPE_DURABLE_TOPIC.equals(subscriptionType)) {
@@ -745,11 +745,28 @@ public class ConsumerActions {
                 firstError = firstError == null ? e : firstError;
             }
         }
-
         if (txSession != null) {
             Exception e = CommonUtils.attemptClose(txSession::close);
             firstError = firstError == null ? e : firstError;
         }
+        if (firstError != null) {
+            throw firstError;
+        }
+    }
+
+    private static BError closeConsumerResources(BObject consumer) {
+        // Set before closing so a receive woken by the close reports "Consumer is closed".
+        consumer.addNativeData(NATIVE_CLOSING, true);
+        String subscriptionType = (String) consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE);
+        FlowReceiver flowReceiver = (FlowReceiver) consumer.getNativeData(NATIVE_FLOW);
+        XMLMessageConsumer xmlConsumer = (XMLMessageConsumer) consumer.getNativeData(NATIVE_CONSUMER);
+        TransactedSession txSession = (TransactedSession) consumer.getNativeData(NATIVE_TX_SESSION);
+        JCSMPSession session = (JCSMPSession) consumer.getNativeData(NATIVE_SESSION);
+
+        // A transacted flow and session must be used serially, so wait for the receive slice or commit in progress.
+        ReentrantLock txLock = (ReentrantLock) consumer.getNativeData(NATIVE_TX_LOCK);
+        Exception firstError = CommonUtils.attemptClose(CommonUtils.serialized(txLock,
+                () -> closeReceiverAndTransaction(subscriptionType, flowReceiver, xmlConsumer, txSession)));
 
         if (session != null) {
             Exception e = CommonUtils.attemptClose(session::closeSession);

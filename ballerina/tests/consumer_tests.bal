@@ -1009,8 +1009,12 @@ function testCancelledReceiveRequeuesTheMessage() returns error? {
         check consumer->ack(redelivered);
     }
     check consumer->close();
-    test:assertTrue(redelivered is StringPayloadMessage,
-            "A message taken by a cancelled receive should be redelivered on the same consumer");
+    if redelivered is () {
+        test:assertFail("A message taken by a cancelled receive should be redelivered on the same consumer");
+    }
+    test:assertEquals(redelivered.payload, "cancelled-receive-payload");
+    test:assertEquals(redelivered.redelivered, true,
+            "The message should come back as a redelivery, not as its first delivery");
 }
 
 @test:Config {groups: ["consumer", "transacted", "concurrency"]}
@@ -1046,7 +1050,8 @@ function testTransactedCommitDoesNotWaitForAnOpenEndedReceive() returns error? {
         auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
         subscriptionConfig: {queueName: CONSUMER_TX_CONCURRENCY_QUEUE}
     });
-    future<Message|Error?> waiting = start receiveOnNonIsolatedStrand(consumer, ());
+    // Longer than the commit threshold, so a commit that waits for the whole receive fails instead of hanging.
+    future<Message|Error?> waiting = start receiveOnNonIsolatedStrand(consumer, 10);
     runtime:sleep(0.5);
 
     decimal startedAt = time:monotonicNow();
@@ -1054,7 +1059,7 @@ function testTransactedCommitDoesNotWaitForAnOpenEndedReceive() returns error? {
     decimal elapsed = time:monotonicNow() - startedAt;
     check consumer->close();
     Message|Error? waited = wait waiting;
-    test:assertTrue(elapsed < 2d, string `commit waited ${elapsed} s for a receive with no timeout`);
+    test:assertTrue(elapsed < 2d, string `commit waited ${elapsed} s for the pending receive`);
     test:assertTrue(waited is Error, "close should end the waiting receive");
 }
 
