@@ -110,7 +110,7 @@ final class SolaceMessageListener implements XMLMessageListener {
                     ValueCreator.createTypedescValue(nativeService.getMessagePayloadType()));
         } catch (BallerinaSolaceDatabindingException e) {
             // The message could not be bound to the service's declared type - a receive-side failure.
-            submit(() -> {
+            submitUnlessSkipped(() -> {
                 dispatchError(CommonUtils.createError(e.getMessage()), null, ERROR_TYPE_RECEIVE);
                 settleUndelivered(message, XMLMessage.Outcome.REJECTED);
             });
@@ -118,7 +118,7 @@ final class SolaceMessageListener implements XMLMessageListener {
         } catch (Throwable t) {
             // The broker delivered a message the connector could not decode - a receive-side failure. Converting the
             // same message fails the same way, so only a JVM Error (such as running out of memory) is requeued.
-            submit(() -> {
+            submitUnlessSkipped(() -> {
                 dispatchError(CommonUtils.createError("Failed to convert message",
                         t instanceof Exception e ? e : new Exception(t)), null, ERROR_TYPE_RECEIVE);
                 settleUndelivered(message, t instanceof Exception ? XMLMessage.Outcome.REJECTED
@@ -129,12 +129,7 @@ final class SolaceMessageListener implements XMLMessageListener {
         SolaceMetricsUtil.reportConsume(url, vpn, destination, destinationKind,
                 CommonUtils.getPayloadSize(ballerinaMessage), CommonUtils.isRedelivered(ballerinaMessage));
         Map<String, String> traceContext = SolaceTracingUtil.extractTraceContextHeaders(ballerinaMessage);
-        submit(() -> {
-            // A message queued behind the in-flight one when the service stops is left for the broker to redeliver.
-            if (!(stopping && skipQueued)) {
-                deliver(message, ballerinaMessage, traceContext);
-            }
-        });
+        submitUnlessSkipped(() -> deliver(message, ballerinaMessage, traceContext));
     }
 
     private void deliver(BytesXMLMessage message, BMap<BString, Object> ballerinaMessage,
@@ -243,6 +238,18 @@ final class SolaceMessageListener implements XMLMessageListener {
         Map<String, Object> properties = new HashMap<>();
         properties.put(ObservabilityConstants.KEY_OBSERVER_CONTEXT, ctx);
         return properties;
+    }
+
+    /**
+     * Submits the handling of a received message, which is skipped if it is still queued when the service stops, so
+     * the broker redelivers the message instead of the stopping listener handling it.
+     */
+    private void submitUnlessSkipped(Runnable task) {
+        submit(() -> {
+            if (!(stopping && skipQueued)) {
+                task.run();
+            }
+        });
     }
 
     private void submit(Runnable task) {
