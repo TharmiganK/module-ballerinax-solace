@@ -48,8 +48,14 @@ import io.ballerina.runtime.api.values.BTypedesc;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.IntFunction;
+import java.util.logging.Logger;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSED;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSE_LOCK;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSING;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CONSUMER_FLOW_STATE_TRACKER;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CONSUMER;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_DESTINATION;
@@ -58,6 +64,7 @@ import static io.ballerina.lib.solace.common.Constants.NATIVE_SETTLE_UNDELIVERED
 import static io.ballerina.lib.solace.common.Constants.NATIVE_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_SUBSCRIPTION_TYPE;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TRANSACTED;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_LOCK;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_EVENT_HANDLER;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_URL;
@@ -86,6 +93,10 @@ public class ConsumerActions {
 
     private static final String INACTIVE_FLOW_ERROR = "InactiveFlowError";
     private static final String FLOW_DOWN_ERROR = "FlowDownError";
+    // Returned by a receive task that the consumer's close ended, so the caller does not count it as a receive error.
+    private static final Object CONSUMER_CLOSED = new Object();
+    private static final int TRANSACTED_RECEIVE_SLICE_MS = 100;
+    private static final Logger LOGGER = Logger.getLogger(ConsumerActions.class.getName());
 
     /**
      * Initialize the consumer with connection URL and configuration. Creates either a transacted or non-transacted
@@ -136,12 +147,15 @@ public class ConsumerActions {
             // Store session references and transacted flag
             consumer.addNativeData(NATIVE_SESSION, session);
             consumer.addNativeData(NATIVE_TX_SESSION, txSession);
+            consumer.addNativeData(NATIVE_TX_LOCK, txSession != null ? new ReentrantLock(true) : null);
             consumer.addNativeData(NATIVE_TRANSACTED, isTransacted);
             boolean directTopic = subscriptionConfig instanceof TopicConsumerConfig topicSubscription
                     && !topicSubscription.isDurable();
             consumer.addNativeData(NATIVE_SETTLE_UNDELIVERED, !isTransacted && !directTopic
                     && subscriptionConfig.ackMode() == AcknowledgementMode.CLIENT_ACK);
             consumer.addNativeData(NATIVE_CLOSED, false);
+            consumer.addNativeData(NATIVE_CLOSING, false);
+            consumer.addNativeData(NATIVE_CLOSE_LOCK, new ReentrantLock());
             consumer.addNativeData(NATIVE_URL, url.getValue());
             consumer.addNativeData(NATIVE_VPN, messageVpn);
             consumer.addNativeData(NATIVE_EVENT_HANDLER, eventHandler);
@@ -193,7 +207,7 @@ public class ConsumerActions {
     /**
      * Receive a message with timeout.
      *
-     * @param env       the Ballerina environment (injected for tracing)
+     * @param env       the Ballerina environment, for tracing and to yield the strand while waiting
      * @param consumer  the Ballerina consumer object
      * @param timeout   the timeout in seconds, or {@code null} to never expire
      * @param bTypedesc the caller-declared expected message type
@@ -206,48 +220,37 @@ public class ConsumerActions {
             return reportConsumerFailure(consumer, ERROR_TYPE_RECEIVE, "Consumer is closed");
         }
         BigDecimal timeoutDecimal = timeout instanceof BDecimal bDecimal ? bDecimal.decimalValue() : BigDecimal.ZERO;
-        long timeoutMs = timeoutDecimal.multiply(BigDecimal.valueOf(1000)).longValue();
+        if (timeoutDecimal.signum() < 0) {
+            return reportConsumerFailure(consumer, ERROR_TYPE_RECEIVE, "Timeout must not be negative");
+        }
+        BigDecimal requestedMs = timeoutDecimal.multiply(BigDecimal.valueOf(1000));
+        // A positive timeout below 1 ms waits 1 ms, since 0 means never expire.
+        int timeoutMs = requestedMs.compareTo(BigDecimal.valueOf(Integer.MAX_VALUE)) >= 0 ? Integer.MAX_VALUE
+                : timeoutDecimal.signum() > 0 ? Math.max(1, requestedMs.intValue()) : 0;
         String subscriptionType = (String) consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE);
 
+        // Read before yielding: a close() from another strand clears these while this one waits.
+        FlowReceiver flowReceiver = (FlowReceiver) consumer.getNativeData(NATIVE_FLOW);
+        XMLMessageConsumer xmlConsumer = (XMLMessageConsumer) consumer.getNativeData(NATIVE_CONSUMER);
+        ReentrantLock txLock = (ReentrantLock) consumer.getNativeData(NATIVE_TX_LOCK);
         try {
-            Object result = CommonUtils.executeBlocking(() -> {
-                BytesXMLMessage message = null;
-                if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
-                        SUBSCRIPTION_TYPE_DURABLE_TOPIC.equals(subscriptionType)) {
-                    FlowReceiver flowReceiver = (FlowReceiver) consumer.getNativeData(NATIVE_FLOW);
-                    if (flowReceiver == null) {
-                        return CommonUtils.createError("Consumer flow not initialized");
-                    }
-                    try {
-                        message = flowReceiver.receive((int) timeoutMs);
-                    } catch (Exception e) {
-                        return new FlowReceiveFailure(e);
-                    }
-                } else if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(subscriptionType)) {
-                    XMLMessageConsumer xmlConsumer = (XMLMessageConsumer) consumer.getNativeData(NATIVE_CONSUMER);
-                    if (xmlConsumer == null) {
-                        return CommonUtils.createError("Consumer not initialized");
-                    }
-                    message = xmlConsumer.receive((int) timeoutMs);
-                }
-                if (message == null) {
-                    return emptyReceiveResult(consumer);
-                }
-                try {
-                    return MessageConverter.toBallerinaMessage(message, bTypedesc);
-                } catch (BallerinaSolaceDatabindingException e) {
-                    return settleUndelivered(consumer, message, XMLMessage.Outcome.REJECTED,
-                            CommonUtils.createError(e.getMessage()));
-                } catch (Throwable t) {
-                    // Converting the same message fails the same way, so only a JVM Error is requeued.
-                    return settleUndelivered(consumer, message,
-                            t instanceof Exception ? XMLMessage.Outcome.REJECTED : XMLMessage.Outcome.FAILED,
-                            CommonUtils.createError("Failed to receive message", t));
-                }
-            });
+            Object result = CommonUtils.executeBlocking(env, () -> txLock == null
+                    ? receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, timeoutMs, false, true,
+                            bTypedesc)
+                    : receiveInTransaction(txLock, timeoutMs, sliceMs -> receiveOne(consumer, subscriptionType,
+                            flowReceiver, xmlConsumer, sliceMs, false, false, bTypedesc), consumer));
 
-            if (result instanceof FlowReceiveFailure failure) {
+            if (result == CONSUMER_CLOSED) {
+                return consumerClosedError();
+            }
+            if (result instanceof ReceiveFailure failure) {
+                if (isClosing(consumer)) {
+                    return consumerClosedError();
+                }
                 SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
+                if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(subscriptionType)) {
+                    return CommonUtils.createError("Failed to receive message", failure.cause());
+                }
                 if (shouldMapToFlowDownError(true, flowState(consumer))) {
                     return flowDownError();
                 }
@@ -259,13 +262,136 @@ public class ConsumerActions {
             }
             reportReceiveOutcome(consumer, result);
             return result;
+        } catch (CommonUtils.StrandCancelledException e) {
+            handleCancelledReceive(consumer, e.taskResult(), txLock != null);
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
             return CommonUtils.createError("Failed to receive message", e);
         }
     }
 
+    /**
+     * Takes one message and converts it, waiting up to {@code waitMs} milliseconds (0 waits indefinitely). When nothing
+     * arrives, {@code checkFlowState} reports an inactive or down flow instead of returning nil.
+     */
+    private static Object receiveOne(BObject consumer, String subscriptionType, FlowReceiver flowReceiver,
+                                     XMLMessageConsumer xmlConsumer, int waitMs, boolean noWait,
+                                     boolean checkFlowState, BTypedesc bTypedesc) {
+        BytesXMLMessage message = null;
+        try {
+            if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
+                    SUBSCRIPTION_TYPE_DURABLE_TOPIC.equals(subscriptionType)) {
+                if (flowReceiver == null) {
+                    return isClosing(consumer) ? CONSUMER_CLOSED
+                            : CommonUtils.createError("Consumer flow not initialized");
+                }
+                message = noWait ? flowReceiver.receiveNoWait() : flowReceiver.receive(waitMs);
+            } else if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(subscriptionType)) {
+                if (xmlConsumer == null) {
+                    return isClosing(consumer) ? CONSUMER_CLOSED : CommonUtils.createError("Consumer not initialized");
+                }
+                message = noWait ? xmlConsumer.receiveNoWait() : xmlConsumer.receive(waitMs);
+            }
+        } catch (Exception e) {
+            return new ReceiveFailure(e);
+        }
+        if (message == null) {
+            if (checkFlowState) {
+                return emptyReceiveResult(consumer);
+            }
+            return isClosing(consumer) ? CONSUMER_CLOSED : null;
+        }
+        try {
+            return MessageConverter.toBallerinaMessage(message, bTypedesc);
+        } catch (BallerinaSolaceDatabindingException e) {
+            return settleUndelivered(consumer, message, XMLMessage.Outcome.REJECTED,
+                    CommonUtils.createError(e.getMessage()));
+        } catch (Throwable t) {
+            // Converting the same message fails the same way, so only a JVM Error is requeued.
+            return settleUndelivered(consumer, message,
+                    t instanceof Exception ? XMLMessage.Outcome.REJECTED : XMLMessage.Outcome.FAILED,
+                    CommonUtils.createError("Failed to receive message", t));
+        }
+    }
+
+    /**
+     * Receives on a transacted session in short slices, holding its lock only during each slice, so another strand's
+     * commit or rollback waits at most one slice. A timeout of 0 waits indefinitely.
+     */
+    private static Object receiveInTransaction(ReentrantLock txLock, int timeoutMs, IntFunction<Object> receive,
+                                               BObject consumer) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        while (true) {
+            long remainingMs = timeoutMs == 0 ? TRANSACTED_RECEIVE_SLICE_MS : millisUntil(deadline);
+            if (remainingMs <= 0) {
+                return emptyReceiveResult(consumer);
+            }
+            if (!txLock.tryLock(Math.min(remainingMs, TRANSACTED_RECEIVE_SLICE_MS), TimeUnit.MILLISECONDS)) {
+                continue;
+            }
+            Object result;
+            try {
+                long leftMs = timeoutMs == 0 ? TRANSACTED_RECEIVE_SLICE_MS : millisUntil(deadline);
+                if (leftMs <= 0) {
+                    return emptyReceiveResult(consumer);
+                }
+                result = receive.apply((int) Math.min(leftMs, TRANSACTED_RECEIVE_SLICE_MS));
+            } finally {
+                txLock.unlock();
+            }
+            if (result != null) {
+                return result;
+            }
+        }
+    }
+
+    // Rounds up, so a budget below 1 ms still polls the flow once.
+    private static long millisUntil(long deadlineNanos) {
+        long nanos = deadlineNanos - System.nanoTime();
+        return nanos <= 0 ? 0 : (nanos + 999_999) / 1_000_000;
+    }
+
+    /**
+     * Handles a message that a cancelled strand had already received: a non-transacted CLIENT_ACK flow returns it to
+     * the queue for redelivery; otherwise it was acknowledged on receipt, or stays in the transaction, and is logged.
+     */
+    @SuppressWarnings("unchecked")
+    private static void handleCancelledReceive(BObject consumer, Object taskResult, boolean transacted) {
+        if (!(taskResult instanceof BMap<?, ?> received)) {
+            return;
+        }
+        XMLMessage message = MessageConverter.extractNativeMessage((BMap<BString, Object>) received);
+        if (message == null) {
+            return;
+        }
+        if (!Boolean.TRUE.equals(consumer.getNativeData(NATIVE_SETTLE_UNDELIVERED))) {
+            String fate;
+            if (transacted) {
+                fate = "it stays in the transaction and is settled by the next commit or rollback";
+            } else if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE))) {
+                fate = "direct messages are not redelivered, so it is discarded";
+            } else {
+                fate = "it was already acknowledged, so it is not redelivered";
+            }
+            LOGGER.warning("A receive was cancelled after it took message " + message.getMessageId() + "; " + fate
+                    + ".");
+            return;
+        }
+        try {
+            message.settle(XMLMessage.Outcome.FAILED);
+            SolaceMetricsUtil.reportNack(consumer, true);
+        } catch (Exception e) {
+            SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_NACK);
+            LOGGER.warning("Failed to return message " + message.getMessageId()
+                    + " taken by a cancelled receive to the queue: " + e.getMessage());
+        }
+    }
+
     private static Object emptyReceiveResult(BObject consumer) {
+        if (isClosing(consumer)) {
+            return CONSUMER_CLOSED;
+        }
         String errorType = flowStateErrorType(flowState(consumer));
         if (INACTIVE_FLOW_ERROR.equals(errorType)) {
             return CommonUtils.createError(errorType, "Consumer flow is inactive and cannot receive messages");
@@ -295,7 +421,16 @@ public class ConsumerActions {
         return tracker == null ? ConsumerFlowStateTracker.State.UNKNOWN : tracker.state();
     }
 
-    private record FlowReceiveFailure(Exception cause) {
+    private record ReceiveFailure(Exception cause) {
+    }
+
+    private static boolean isClosing(BObject consumer) {
+        return Boolean.TRUE.equals(consumer.getNativeData(NATIVE_CLOSING))
+                || Boolean.TRUE.equals(consumer.getNativeData(NATIVE_CLOSED));
+    }
+
+    private static BError consumerClosedError() {
+        return CommonUtils.createError("Consumer is closed");
     }
 
     /**
@@ -323,7 +458,7 @@ public class ConsumerActions {
     /**
      * Receive a message without waiting.
      *
-     * @param env       the Ballerina environment (injected for tracing)
+     * @param env       the Ballerina environment, for tracing and to yield the strand while waiting
      * @param consumer  the Ballerina consumer object
      * @param bTypedesc the caller-declared expected message type
      * @return the received message, null if none available, or BError on failure
@@ -335,45 +470,44 @@ public class ConsumerActions {
             return reportConsumerFailure(consumer, ERROR_TYPE_RECEIVE, "Consumer is closed");
         }
         String subscriptionType = (String) consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE);
+        FlowReceiver flowReceiver = (FlowReceiver) consumer.getNativeData(NATIVE_FLOW);
+        XMLMessageConsumer xmlConsumer = (XMLMessageConsumer) consumer.getNativeData(NATIVE_CONSUMER);
+        ReentrantLock txLock = (ReentrantLock) consumer.getNativeData(NATIVE_TX_LOCK);
         try {
-            Object result = CommonUtils.executeBlocking(() -> {
-                BytesXMLMessage message = null;
-                if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
-                        SUBSCRIPTION_TYPE_DURABLE_TOPIC.equals(subscriptionType)) {
-                    FlowReceiver flowReceiver = (FlowReceiver) consumer.getNativeData(NATIVE_FLOW);
-                    if (flowReceiver == null) {
-                        return CommonUtils.createError("Consumer flow not initialized");
-                    }
-                    message = flowReceiver.receiveNoWait();
-                } else if (SUBSCRIPTION_TYPE_DIRECT_TOPIC.equals(subscriptionType)) {
-                    XMLMessageConsumer xmlConsumer = (XMLMessageConsumer) consumer.getNativeData(NATIVE_CONSUMER);
-                    if (xmlConsumer == null) {
-                        return CommonUtils.createError("Consumer not initialized");
-                    }
-                    message = xmlConsumer.receiveNoWait();
+            Object result = CommonUtils.executeBlocking(env, () -> {
+                if (txLock == null) {
+                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, 0, true, false, bTypedesc);
                 }
-                if (message == null) {
+                // A receive or commit in progress on the transacted session means no message is available now.
+                if (!txLock.tryLock()) {
                     return null;
                 }
                 try {
-                    return MessageConverter.toBallerinaMessage(message, bTypedesc);
-                } catch (BallerinaSolaceDatabindingException e) {
-                    return settleUndelivered(consumer, message, XMLMessage.Outcome.REJECTED,
-                            CommonUtils.createError(e.getMessage()));
-                } catch (Throwable t) {
-                    // Converting the same message fails the same way, so only a JVM Error is requeued.
-                    return settleUndelivered(consumer, message,
-                            t instanceof Exception ? XMLMessage.Outcome.REJECTED : XMLMessage.Outcome.FAILED,
-                            CommonUtils.createError("Failed to receive message", t));
+                    return receiveOne(consumer, subscriptionType, flowReceiver, xmlConsumer, 0, true, false, bTypedesc);
+                } finally {
+                    txLock.unlock();
                 }
             });
 
+            if (result == CONSUMER_CLOSED) {
+                return consumerClosedError();
+            }
+            if (result instanceof ReceiveFailure failure) {
+                if (isClosing(consumer)) {
+                    return consumerClosedError();
+                }
+                SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
+                return CommonUtils.createError("Failed to receive message", failure.cause());
+            }
             if (result instanceof BError bError) {
                 SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
                 return bError;
             }
             reportReceiveOutcome(consumer, result);
             return result;
+        } catch (CommonUtils.StrandCancelledException e) {
+            handleCancelledReceive(consumer, e.taskResult(), txLock != null);
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_RECEIVE);
             return CommonUtils.createError("Failed to receive message", e);
@@ -397,11 +531,12 @@ public class ConsumerActions {
     /**
      * Acknowledge a message.
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param consumer the Ballerina consumer object
      * @param message  the Ballerina message to acknowledge
      * @return null on success, BError on failure
      */
-    public static BError acknowledge(BObject consumer, BMap<BString, Object> message) {
+    public static BError acknowledge(Environment env, BObject consumer, BMap<BString, Object> message) {
         try {
             Boolean closed = (Boolean) consumer.getNativeData(NATIVE_CLOSED);
             if (closed != null && closed) {
@@ -414,13 +549,15 @@ public class ConsumerActions {
                         "Cannot acknowledge: native message not found");
             }
 
-            Object result = CommonUtils.executeBlocking(nativeMessage::ackMessage);
+            Object result = CommonUtils.executeBlocking(env, nativeMessage::ackMessage);
             if (result instanceof BError) {
                 SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_ACKNOWLEDGE);
                 return (BError) result;
             }
             SolaceMetricsUtil.reportAck(consumer);
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_ACKNOWLEDGE);
             return CommonUtils.createError("Failed to acknowledge message", e);
@@ -430,12 +567,13 @@ public class ConsumerActions {
     /**
      * Negatively acknowledge a message (NACK).
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param consumer the Ballerina consumer object
      * @param message  the Ballerina message to NACK
      * @param requeue  if true, use FAILED outcome (requeue); if false, use REJECTED outcome (DMQ)
      * @return null on success, BError on failure
      */
-    public static BError nack(BObject consumer, BMap<BString, Object> message, boolean requeue) {
+    public static BError nack(Environment env, BObject consumer, BMap<BString, Object> message, boolean requeue) {
         try {
             Boolean closed = (Boolean) consumer.getNativeData(NATIVE_CLOSED);
             if (closed != null && closed) {
@@ -448,7 +586,7 @@ public class ConsumerActions {
             }
 
             // Use settle() with appropriate outcome
-            Object result = CommonUtils.executeBlocking(() -> {
+            Object result = CommonUtils.executeBlocking(env, () -> {
                 XMLMessage.Outcome outcome = requeue ? XMLMessage.Outcome.FAILED : XMLMessage.Outcome.REJECTED;
                 nativeMessage.settle(outcome);
                 return null;
@@ -459,6 +597,8 @@ public class ConsumerActions {
             }
             SolaceMetricsUtil.reportNack(consumer, requeue);
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_NACK);
             return CommonUtils.createError("Failed to NACK message", e);
@@ -468,10 +608,11 @@ public class ConsumerActions {
     /**
      * Commit the current transaction. Only valid for transacted consumers (when connectionConfig.transacted = true).
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param consumer the Ballerina consumer object
      * @return null on success, BError on failure
      */
-    public static BError commit(BObject consumer) {
+    public static BError commit(Environment env, BObject consumer) {
         try {
             Boolean closed = (Boolean) consumer.getNativeData(NATIVE_CLOSED);
             if (closed != null && closed) {
@@ -491,7 +632,8 @@ public class ConsumerActions {
             }
 
             // Commit transaction on TransactedSession (blocking operation)
-            Object result = CommonUtils.executeBlocking(txSession::commit);
+            ReentrantLock txLock = (ReentrantLock) consumer.getNativeData(NATIVE_TX_LOCK);
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, txSession::commit));
 
             if (result instanceof BError) {
                 SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_COMMIT);
@@ -499,6 +641,8 @@ public class ConsumerActions {
             }
 
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_COMMIT);
             return CommonUtils.createError("Failed to commit transaction", e);
@@ -508,10 +652,11 @@ public class ConsumerActions {
     /**
      * Rollback the current transaction. Only valid for transacted consumers (when connectionConfig.transacted = true).
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param consumer the Ballerina consumer object
      * @return null on success, BError on failure
      */
-    public static BError rollback(BObject consumer) {
+    public static BError rollback(Environment env, BObject consumer) {
         try {
             Boolean closed = (Boolean) consumer.getNativeData(NATIVE_CLOSED);
             if (closed != null && closed) {
@@ -531,7 +676,8 @@ public class ConsumerActions {
             }
 
             // Rollback transaction on TransactedSession (blocking operation)
-            Object result = CommonUtils.executeBlocking(txSession::rollback);
+            ReentrantLock txLock = (ReentrantLock) consumer.getNativeData(NATIVE_TX_LOCK);
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, txSession::rollback));
 
             if (result instanceof BError) {
                 SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_ROLLBACK);
@@ -539,6 +685,8 @@ public class ConsumerActions {
             }
 
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(consumer, ERROR_TYPE_ROLLBACK);
             return CommonUtils.createError("Failed to rollback transaction", e);
@@ -549,19 +697,39 @@ public class ConsumerActions {
      * Close the consumer and release resources. Closes flow receiver/consumer, transacted session (if any), and base
      * session in that order.
      *
-     * @param env      the Ballerina environment (injected for tracing)
+     * @param env      the Ballerina environment, for tracing and to yield the strand while waiting
      * @param consumer the Ballerina consumer object
      * @return null on success, BError on failure
      */
     public static BError close(Environment env, BObject consumer) {
         SolaceTracingUtil.traceResourceInvocation(env, consumer);
-        String subscriptionType = (String) consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE);
-        FlowReceiver flowReceiver = (FlowReceiver) consumer.getNativeData(NATIVE_FLOW);
-        XMLMessageConsumer xmlConsumer = (XMLMessageConsumer) consumer.getNativeData(NATIVE_CONSUMER);
-        TransactedSession txSession = (TransactedSession) consumer.getNativeData(NATIVE_TX_SESSION);
-        JCSMPSession session = (JCSMPSession) consumer.getNativeData(NATIVE_SESSION);
+        return CommonUtils.yieldToClose(env, () -> closeConsumer(consumer));
+    }
 
-        // Attempt to close every resource independently so one failure doesn't block the rest.
+    private static BError closeConsumer(BObject consumer) {
+        // close now yields, so two strands can reach here together; only the first one closes. A ReentrantLock, unlike
+        // synchronized, does not pin the strand's virtual thread while the flow and sessions close.
+        ReentrantLock closeLock = (ReentrantLock) consumer.getNativeData(NATIVE_CLOSE_LOCK);
+        if (closeLock == null) {
+            return Boolean.TRUE.equals(consumer.getNativeData(NATIVE_CLOSED)) ? null : closeConsumerResources(consumer);
+        }
+        closeLock.lock();
+        try {
+            if (Boolean.TRUE.equals(consumer.getNativeData(NATIVE_CLOSED))) {
+                return null;
+            }
+            return closeConsumerResources(consumer);
+        } finally {
+            closeLock.unlock();
+        }
+    }
+
+    /**
+     * Closes the flow or direct consumer and then the transacted session, each attempted even if the last one failed.
+     */
+    private static void closeReceiverAndTransaction(String subscriptionType, FlowReceiver flowReceiver,
+                                                    XMLMessageConsumer xmlConsumer, TransactedSession txSession)
+            throws Exception {
         Exception firstError = null;
         if (SUBSCRIPTION_TYPE_QUEUE.equals(subscriptionType) ||
                 SUBSCRIPTION_TYPE_DURABLE_TOPIC.equals(subscriptionType)) {
@@ -577,11 +745,28 @@ public class ConsumerActions {
                 firstError = firstError == null ? e : firstError;
             }
         }
-
         if (txSession != null) {
             Exception e = CommonUtils.attemptClose(txSession::close);
             firstError = firstError == null ? e : firstError;
         }
+        if (firstError != null) {
+            throw firstError;
+        }
+    }
+
+    private static BError closeConsumerResources(BObject consumer) {
+        // Set before closing so a receive woken by the close reports "Consumer is closed".
+        consumer.addNativeData(NATIVE_CLOSING, true);
+        String subscriptionType = (String) consumer.getNativeData(NATIVE_SUBSCRIPTION_TYPE);
+        FlowReceiver flowReceiver = (FlowReceiver) consumer.getNativeData(NATIVE_FLOW);
+        XMLMessageConsumer xmlConsumer = (XMLMessageConsumer) consumer.getNativeData(NATIVE_CONSUMER);
+        TransactedSession txSession = (TransactedSession) consumer.getNativeData(NATIVE_TX_SESSION);
+        JCSMPSession session = (JCSMPSession) consumer.getNativeData(NATIVE_SESSION);
+
+        // A transacted flow and session must be used serially, so wait for the receive slice or commit in progress.
+        ReentrantLock txLock = (ReentrantLock) consumer.getNativeData(NATIVE_TX_LOCK);
+        Exception firstError = CommonUtils.attemptClose(CommonUtils.serialized(txLock,
+                () -> closeReceiverAndTransaction(subscriptionType, flowReceiver, xmlConsumer, txSession)));
 
         if (session != null) {
             Exception e = CommonUtils.attemptClose(session::closeSession);

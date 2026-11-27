@@ -48,15 +48,18 @@ import java.time.Duration;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSED;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_CLOSE_LOCK;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_EVENT_HANDLER;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_PUBLISH_ACK_TRACKER;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_PRODUCER;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TRANSACTED;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_LOCK;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_SESSION;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_URL;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_VPN;
@@ -143,9 +146,11 @@ public class ProducerActions {
             // Store session references in native data
             producer.addNativeData(NATIVE_SESSION, session);
             producer.addNativeData(NATIVE_TX_SESSION, txSession);
+            producer.addNativeData(NATIVE_TX_LOCK, txSession != null ? new ReentrantLock(true) : null);
             producer.addNativeData(NATIVE_TRANSACTED, isTransacted);
             producer.addNativeData(NATIVE_PRODUCER, xmlProducer);
             producer.addNativeData(NATIVE_CLOSED, false);
+            producer.addNativeData(NATIVE_CLOSE_LOCK, new ReentrantLock());
             producer.addNativeData(NATIVE_URL, url.getValue());
             producer.addNativeData(NATIVE_VPN, messageVpn);
             producer.addNativeData(NATIVE_EVENT_HANDLER, eventHandler);
@@ -170,7 +175,7 @@ public class ProducerActions {
     /**
      * Send a message to the specified destination.
      *
-     * @param env            the Ballerina environment (injected for tracing)
+     * @param env            the Ballerina environment, for tracing and to yield the strand while waiting
      * @param producer       the Ballerina producer object
      * @param message        the message to send
      * @param destinationMap the destination (Topic or Queue)
@@ -184,7 +189,7 @@ public class ProducerActions {
     /**
      * Send a guaranteed message to the specified destination and wait until the broker acknowledges it.
      *
-     * @param env            the Ballerina environment (injected for tracing)
+     * @param env            the Ballerina environment, for tracing and to yield the strand while waiting
      * @param producer       the Ballerina producer object
      * @param message        the message to send
      * @param destinationMap the destination (Topic or Queue)
@@ -215,6 +220,8 @@ public class ProducerActions {
         SolaceTracingUtil.traceResourceInvocation(env, producer, destinationName);
         PublishAcknowledgementTracker tracker = null;
         Long correlationKey = null;
+        PublishAcknowledgementTracker.AwaitedPublish awaitedPublish = null;
+        boolean sent = false;
         try {
             XMLMessageProducer xmlProducer = (XMLMessageProducer) producer.getNativeData(NATIVE_PRODUCER);
             if (xmlProducer == null) {
@@ -226,7 +233,7 @@ public class ProducerActions {
                 return reportPublishFailure(producer, destinationName, destinationKind, "Producer is closed");
             }
 
-            XMLMessage jcsmpMessage = MessageConverter.toJCSMPMessage(xmlProducer, message);
+            XMLMessage jcsmpMessage = MessageConverter.toJCSMPMessage(message);
             injectTraceContext(env, jcsmpMessage);
 
             if (destinationMap == null || destinationMap.isEmpty()) {
@@ -239,7 +246,6 @@ public class ProducerActions {
                     DestinationConverter.fromDestinationInterface(destination);
 
             tracker = (PublishAcknowledgementTracker) producer.getNativeData(NATIVE_PUBLISH_ACK_TRACKER);
-            PublishAcknowledgementTracker.AwaitedPublish awaitedPublish = null;
             if (tracker != null && jcsmpMessage.getDeliveryMode() != com.solacesystems.jcsmp.DeliveryMode.DIRECT) {
                 try {
                     if (acknowledgementTimeout != null) {
@@ -258,9 +264,9 @@ public class ProducerActions {
             final com.solacesystems.jcsmp.Destination finalDestination = jcsmpDestination;
             final Long finalCorrelationKey = correlationKey;
             long startNanos = System.nanoTime();
-            Object result = CommonUtils.executeBlocking(() -> {
-                xmlProducer.send(finalMessage, finalDestination);
-            });
+            ReentrantLock txLock = (ReentrantLock) producer.getNativeData(NATIVE_TX_LOCK);
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock,
+                    () -> xmlProducer.send(finalMessage, finalDestination)));
 
             if (result instanceof BError bError) {
                 if (tracker != null && finalCorrelationKey != null) {
@@ -269,13 +275,20 @@ public class ProducerActions {
                 SolaceMetricsUtil.reportProducerError(producer, destinationName, destinationKind, ERROR_TYPE_PUBLISH);
                 return CommonUtils.createError(bError.getMessage());
             }
+            sent = true;
 
             if (awaitedPublish != null) {
-                final PublishAcknowledgementTracker finalTracker = tracker;
                 final PublishAcknowledgementTracker.AwaitedPublish finalAwaitedPublish = awaitedPublish;
-                Object acknowledgementResult = CommonUtils.executeBlocking(() -> awaitAcknowledgement(
-                        finalTracker, finalAwaitedPublish, acknowledgementTimeout, destinationName));
+                Object acknowledgementResult = CommonUtils.executeBlocking(env, () -> awaitAcknowledgement(
+                        finalAwaitedPublish, acknowledgementTimeout, destinationName));
                 if (acknowledgementResult instanceof BError acknowledgementError) {
+                    // Settled only now that the caller gets the error; a cancelled wait leaves the publish to close().
+                    if (PUBLISH_REJECTED_ERROR.equals(acknowledgementError.getType().getName())) {
+                        tracker.claimRejection(awaitedPublish.key());
+                    } else {
+                        // A timeout or interrupt leaves the outcome unknown, so it is not reported again on close.
+                        tracker.cancel(awaitedPublish.key());
+                    }
                     SolaceMetricsUtil.reportProducerError(producer, destinationName, destinationKind,
                             ERROR_TYPE_PUBLISH);
                     return acknowledgementError;
@@ -287,6 +300,19 @@ public class ProducerActions {
             SolaceMetricsUtil.reportPublish(producer, destinationName, destinationKind, getDeliveryMode(message), size,
                     elapsedNanos);
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            // A key whose message was never sent would hold close() for its drain timeout. A sent message keeps its
+            // key, so a later broker rejection is still reported by close().
+            boolean messageSent = sent || (e.taskCompleted() && !(e.taskResult() instanceof BError));
+            if (tracker != null && correlationKey != null) {
+                if (messageSent) {
+                    // An unreported rejection stays unclaimed in the tracker, so close() reports it.
+                    tracker.detachAwaiter(correlationKey);
+                } else {
+                    tracker.cancel(correlationKey);
+                }
+            }
+            throw e.panic();
         } catch (Exception e) {
             if (tracker != null && correlationKey != null) {
                 tracker.cancel(correlationKey);
@@ -301,15 +327,12 @@ public class ProducerActions {
      *
      * @return null if the broker acknowledged the message, otherwise the error to return from the send
      */
-    private static BError awaitAcknowledgement(PublishAcknowledgementTracker tracker,
-                                               PublishAcknowledgementTracker.AwaitedPublish awaitedPublish,
+    private static BError awaitAcknowledgement(PublishAcknowledgementTracker.AwaitedPublish awaitedPublish,
                                                Duration timeout, String destinationName) {
         try {
             awaitedPublish.confirmation().get(timeout.toMillis(), TimeUnit.MILLISECONDS);
             return null;
         } catch (TimeoutException e) {
-            // The outcome is unknown, so stop tracking the message instead of reporting it again on close
-            tracker.cancel(awaitedPublish.key());
             return CommonUtils.createError(String.format(
                     "Timed out after %d ms waiting for the broker to acknowledge the message published to '%s'",
                     timeout.toMillis(), destinationName));
@@ -323,8 +346,7 @@ public class ProducerActions {
             return CommonUtils.createError(String.format(
                     "Failed to confirm the message published to '%s'", destinationName), cause);
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            tracker.cancel(awaitedPublish.key());
+            // Reported as an error; the flag is not restored because this runs on the calling strand's thread.
             return CommonUtils.createError(String.format(
                     "Interrupted while waiting for the broker to acknowledge the message published to '%s'",
                     destinationName), e);
@@ -356,10 +378,11 @@ public class ProducerActions {
     /**
      * Commit the current transaction. Only valid for transacted producers (when connectionConfig.transacted = true).
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param producer the Ballerina producer object
      * @return null on success, BError on failure
      */
-    public static BError commit(BObject producer) {
+    public static BError commit(Environment env, BObject producer) {
         try {
             Boolean transacted = (Boolean) producer.getNativeData(NATIVE_TRANSACTED);
             if (transacted == null || !transacted) {
@@ -380,7 +403,8 @@ public class ProducerActions {
             }
 
             // Commit transaction on TransactedSession (blocking operation)
-            Object result = CommonUtils.executeBlocking(txSession::commit);
+            ReentrantLock txLock = (ReentrantLock) producer.getNativeData(NATIVE_TX_LOCK);
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, txSession::commit));
 
             if (result instanceof BError) {
                 SolaceMetricsUtil.reportProducerError(producer, ERROR_TYPE_COMMIT);
@@ -388,6 +412,8 @@ public class ProducerActions {
             }
 
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportProducerError(producer, ERROR_TYPE_COMMIT);
             return CommonUtils.createError("Failed to commit transaction", e);
@@ -397,10 +423,11 @@ public class ProducerActions {
     /**
      * Rollback the current transaction. Only valid for transacted producers (when connectionConfig.transacted = true).
      *
+     * @param env      the Ballerina environment, used to yield the strand while waiting
      * @param producer the Ballerina producer object
      * @return null on success, BError on failure
      */
-    public static BError rollback(BObject producer) {
+    public static BError rollback(Environment env, BObject producer) {
         try {
             Boolean transacted = (Boolean) producer.getNativeData(NATIVE_TRANSACTED);
             if (transacted == null || !transacted) {
@@ -421,7 +448,8 @@ public class ProducerActions {
             }
 
             // Rollback transaction on TransactedSession (blocking operation)
-            Object result = CommonUtils.executeBlocking(txSession::rollback);
+            ReentrantLock txLock = (ReentrantLock) producer.getNativeData(NATIVE_TX_LOCK);
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, txSession::rollback));
 
             if (result instanceof BError) {
                 SolaceMetricsUtil.reportProducerError(producer, ERROR_TYPE_ROLLBACK);
@@ -429,6 +457,8 @@ public class ProducerActions {
             }
 
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportProducerError(producer, ERROR_TYPE_ROLLBACK);
             return CommonUtils.createError("Failed to rollback transaction", e);
@@ -438,12 +468,34 @@ public class ProducerActions {
     /**
      * Close the producer and release resources.
      *
-     * @param env      the Ballerina environment (injected for tracing)
+     * @param env      the Ballerina environment, for tracing and to yield the strand while waiting
      * @param producer the Ballerina producer object
      * @return null on success, BError on failure
      */
     public static BError close(Environment env, BObject producer) {
         SolaceTracingUtil.traceResourceInvocation(env, producer);
+        return CommonUtils.yieldToClose(env, () -> closeProducer(producer));
+    }
+
+    private static BError closeProducer(BObject producer) {
+        // close now yields, so two strands can reach here together; only the first one closes. A ReentrantLock, unlike
+        // synchronized, does not pin the strand's virtual thread while the close drains publishes.
+        ReentrantLock closeLock = (ReentrantLock) producer.getNativeData(NATIVE_CLOSE_LOCK);
+        if (closeLock == null) {
+            return Boolean.TRUE.equals(producer.getNativeData(NATIVE_CLOSED)) ? null : closeProducerResources(producer);
+        }
+        closeLock.lock();
+        try {
+            if (Boolean.TRUE.equals(producer.getNativeData(NATIVE_CLOSED))) {
+                return null;
+            }
+            return closeProducerResources(producer);
+        } finally {
+            closeLock.unlock();
+        }
+    }
+
+    private static BError closeProducerResources(BObject producer) {
         XMLMessageProducer xmlProducer = (XMLMessageProducer) producer.getNativeData(NATIVE_PRODUCER);
         TransactedSession txSession = (TransactedSession) producer.getNativeData(NATIVE_TX_SESSION);
         JCSMPSession session = (JCSMPSession) producer.getNativeData(NATIVE_SESSION);
@@ -457,20 +509,22 @@ public class ProducerActions {
             try {
                 drainResult = tracker.awaitSettlement(PUBLISH_ACK_DRAIN_TIMEOUT);
             } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+                // Reported as an error; the flag is not restored because this runs on the calling strand's thread.
                 firstError = e;
             }
         }
 
-        // Attempt to close every resource independently so one failure doesn't block the rest.
-        if (xmlProducer != null) {
-            Exception e = CommonUtils.attemptClose(xmlProducer::close);
-            firstError = firstError == null ? e : firstError;
-        }
-        if (txSession != null) {
-            Exception e = CommonUtils.attemptClose(txSession::close);
-            firstError = firstError == null ? e : firstError;
-        }
+        // Attempt to close every resource independently so one failure doesn't block the rest. A transacted producer
+        // and session must be used serially, so wait for the send or commit in progress.
+        ReentrantLock txLock = (ReentrantLock) producer.getNativeData(NATIVE_TX_LOCK);
+        Exception closeError = CommonUtils.attemptClose(CommonUtils.serialized(txLock, () -> {
+            Exception producerError = xmlProducer != null ? CommonUtils.attemptClose(xmlProducer::close) : null;
+            Exception txError = txSession != null ? CommonUtils.attemptClose(txSession::close) : null;
+            if (producerError != null || txError != null) {
+                throw producerError != null ? producerError : txError;
+            }
+        }));
+        firstError = firstError == null ? closeError : firstError;
         if (session != null) {
             Exception e = CommonUtils.attemptClose(session::closeSession);
             firstError = firstError == null ? e : firstError;

@@ -67,7 +67,9 @@ public isolated client class MessageConsumer {
     # Receive a message with a timeout.
     #
     # Blocks up to the specified timeout waiting for a message. Returns nil if an active flow is empty,
-    # `InactiveFlowError` if the flow is inactive, or `FlowDownError` if it is down.
+    # `InactiveFlowError` if the flow is inactive, or `FlowDownError` if it is down. On a transacted consumer, a
+    # `commit` or `rollback` from another strand runs between the short receive slices this waits in, so a message
+    # that arrives after it belongs to the next transaction.
     #
     # If the message cannot be converted or bound to `T`, an `Error` is returned. For a non-transacted `CLIENT_ACK`
     # consumer on a queue or durable topic endpoint, the message is also rejected, because it is never returned to be
@@ -75,7 +77,8 @@ public isolated client class MessageConsumer {
     # On brokers before 10.25.10, or on a queue set to respect DMQ eligibility, only a message the publisher marked
     # DMQ-eligible moves there.
     #
-    # + timeout - Maximum time in seconds to wait for a message. A nil or zero timeout never expires
+    # + timeout - Maximum time in seconds to wait for a message. A nil or zero timeout never expires, and a negative
+    # timeout returns an `Error`
     # + T - Optional type description of the expected message type; declare a narrowed
     # `record {|*Message; T payload;|}` to have the payload data-bound into `T`
     # + return - The received message, nil on an active-flow timeout, or an Error
@@ -86,7 +89,8 @@ public isolated client class MessageConsumer {
     # Receive a message without waiting.
     #
     # Returns immediately with a message if available, or nil if no message is available.
-    # This is a non-blocking operation.
+    # This is a non-blocking operation. On a transacted consumer it also returns nil while another strand's `receive`,
+    # `commit` or `rollback` is using the transaction.
     #
     # If the message cannot be converted or bound to `T`, an `Error` is returned. For a non-transacted `CLIENT_ACK`
     # consumer on a queue or durable topic endpoint, the message is also rejected, because it is never returned to be
@@ -135,6 +139,8 @@ public isolated client class MessageConsumer {
     # Commit the current transaction.
     #
     # Only applicable in transacted mode. Commits all message operations since the last commit/rollback.
+    # On a transacted consumer, `receive`, `receiveNoWait`, `commit` and `rollback` run one at a time, so this
+    # waits for a call already in progress; a waiting `receive` gives way within a fraction of a second.
     #
     # + return - Error if commit fails
     isolated remote function 'commit() returns Error? = @java:Method {
@@ -144,6 +150,8 @@ public isolated client class MessageConsumer {
     # Rollback the current transaction.
     #
     # Only applicable in transacted mode. Rolls back all message operations since the last commit/rollback.
+    # On a transacted consumer, `receive`, `receiveNoWait`, `commit` and `rollback` run one at a time, so this
+    # waits for a call already in progress; a waiting `receive` gives way within a fraction of a second.
     #
     # + return - Error if rollback fails
     isolated remote function 'rollback() returns Error? = @java:Method {

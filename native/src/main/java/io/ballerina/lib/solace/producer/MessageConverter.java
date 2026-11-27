@@ -27,7 +27,6 @@ import com.solacesystems.jcsmp.SDTException;
 import com.solacesystems.jcsmp.SDTMap;
 import com.solacesystems.jcsmp.TextMessage;
 import com.solacesystems.jcsmp.XMLMessage;
-import com.solacesystems.jcsmp.XMLMessageProducer;
 import io.ballerina.lib.solace.common.DestinationConverter;
 import io.ballerina.lib.solace.common.PropertyConverter;
 import io.ballerina.runtime.api.utils.StringUtils;
@@ -62,16 +61,15 @@ public class MessageConverter {
     /**
      * Converts a Ballerina Message to a JCSMP XMLMessage.
      *
-     * @param producer the JCSMP message producer (used for message creation)
-     * @param message  the Ballerina Message record
+     * @param message the Ballerina Message record
      * @return the JCSMP XMLMessage with all fields set
      * @throws Exception if conversion fails
      */
-    public static XMLMessage toJCSMPMessage(XMLMessageProducer producer, BMap<BString, Object> message)
+    public static XMLMessage toJCSMPMessage(BMap<BString, Object> message)
             throws Exception {
         Object payload = message.get(PAYLOAD_KEY);
 
-        XMLMessage jcsmpMessage = createMessageByContentType(producer, payload);
+        XMLMessage jcsmpMessage = createMessageByContentType(payload);
 
         // Set all message fields from Ballerina Message record
         setMessageFields(jcsmpMessage, message);
@@ -82,18 +80,19 @@ public class MessageConverter {
     /**
      * Creates a JCSMP message whose concrete subtype matches the payload's wire shape - a {@code BString}
      * becomes a {@link TextMessage}, a {@code BArray} a {@link BytesMessage} (unchanged, existing behavior),
-     * and a {@code BMap} a {@link MapMessage}.
+     * and a {@code BMap} a {@link MapMessage}. The messages are session-independent, since JCSMP lets several threads
+     * send guaranteed messages on one producer only when they are.
      */
-    private static XMLMessage createMessageByContentType(XMLMessageProducer producer, Object payload)
+    private static XMLMessage createMessageByContentType(Object payload)
             throws Exception {
         if (payload instanceof BString bString) {
-            TextMessage textMessage = producer.createTextMessage();
+            TextMessage textMessage = JCSMPFactory.onlyInstance().createMessage(TextMessage.class);
             textMessage.setText(bString.getValue());
             return textMessage;
         } else if (payload instanceof BArray bArray) {
-            return toByteMessage(producer, bArray.getBytes());
+            return toByteMessage(bArray.getBytes());
         } else if (payload instanceof BMap<?, ?> bMap) {
-            MapMessage mapMessage = producer.createMapMessage();
+            MapMessage mapMessage = JCSMPFactory.onlyInstance().createMessage(MapMessage.class);
             @SuppressWarnings("unchecked")
             SDTMap sdtMap = PropertyConverter.ballerinaToSDTMap((BMap<BString, Object>) bMap);
             mapMessage.setMap(sdtMap != null ? sdtMap : JCSMPFactory.onlyInstance().createMap());
@@ -228,16 +227,12 @@ public class MessageConverter {
     /**
      * Creates a BytesMessage from byte array payload. Uses attachment part instead of content part for the payload.
      */
-    public static BytesMessage toByteMessage(XMLMessageProducer producer, byte[] content)
-            throws Exception {
-        if (producer == null) {
-            throw new Exception("XMLMessageProducer cannot be null");
-        }
+    public static BytesMessage toByteMessage(byte[] content) throws Exception {
         if (content == null) {
             throw new Exception("Message content cannot be null");
         }
 
-        BytesMessage message = producer.createBytesMessage();
+        BytesMessage message = JCSMPFactory.onlyInstance().createMessage(BytesMessage.class);
         if (message == null) {
             throw new Exception("Failed to create BytesXMLMessage");
         }

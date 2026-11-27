@@ -16,6 +16,7 @@
 
 import ballerina/lang.runtime;
 import ballerina/test;
+import ballerina/time;
 
 // ========================================
 // Consumer Initialization Tests
@@ -468,9 +469,13 @@ isolated function testInactiveTransactedQueueConsumerReturnsTypedError() returns
         subscriptionConfig: {queueName: CONSUMER_TX_STANDBY_QUEUE}
     });
 
+    decimal startedAt = time:monotonicNow();
     Message|Error? result = standbyConsumer->receive(SHORT_RECEIVE_TIMEOUT);
+    decimal elapsed = time:monotonicNow() - startedAt;
     test:assertTrue(result is InactiveFlowError,
         "An inactive transacted flow must return InactiveFlowError");
+    test:assertTrue(elapsed >= SHORT_RECEIVE_TIMEOUT - 0.2d,
+        string `An inactive transacted flow should be reported after the timeout, not after ${elapsed} s`);
 
     check standbyConsumer->close();
     check activeConsumer->close();
@@ -966,3 +971,156 @@ isolated function testConsumerDefaultAckModeDoesNotRedeliver() returns error? {
 
     check consumer2->close();
 }
+
+// ========================================
+// A waiting call must not hold the lock shared by non-isolated strands
+// ========================================
+int nonIsolatedReceiveCalls = 0;
+
+function receiveOnNonIsolatedStrand(MessageConsumer consumer, decimal? timeout) returns Message|Error? {
+    nonIsolatedReceiveCalls += 1;
+    return consumer->receive(timeout);
+}
+
+function newConcurrencyConsumer() returns MessageConsumer|error => new (BROKER_URL, {
+    messageVpn: MESSAGE_VPN,
+    auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+    subscriptionConfig: {queueName: CONSUMER_CONCURRENCY_QUEUE}
+});
+
+@test:Config {groups: ["consumer", "concurrency"]}
+function testWaitingReceiveDoesNotBlockOtherStrands() returns error? {
+    MessageConsumer consumer = check newConcurrencyConsumer();
+    // Measured from the start of the receiving strand: while it waited without yielding, this strand's
+    // sleep could not resume until the 5 s receive timed out.
+    decimal startedAt = time:monotonicNow();
+    future<Message|Error?> pending = start receiveOnNonIsolatedStrand(consumer, 5);
+    runtime:sleep(0.7);
+    decimal elapsed = time:monotonicNow() - startedAt;
+
+    Message|Error? received = wait pending;
+    check consumer->close();
+    test:assertTrue(received is (), "The queue is empty, so receive should time out");
+    test:assertTrue(elapsed < 3d, string `runtime:sleep(0.7) took ${elapsed} s while receive was waiting`);
+}
+
+@test:Config {groups: ["consumer", "concurrency"]}
+function testCloseEndsWaitingReceive() returns error? {
+    check assertCloseEndsWaitingReceive(check newConcurrencyConsumer());
+}
+
+@test:Config {groups: ["consumer", "concurrency"]}
+function testCloseEndsWaitingDirectTopicReceive() returns error? {
+    MessageConsumer consumer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+        subscriptionConfig: {topicName: CONSUMER_CONCURRENCY_TOPIC}
+    });
+    check assertCloseEndsWaitingReceive(consumer);
+}
+
+function assertCloseEndsWaitingReceive(MessageConsumer consumer) returns error? {
+    // A finite timeout makes this fail rather than hang if close does not end the wait.
+    future<Message|Error?> pending = start receiveOnNonIsolatedStrand(consumer, 20);
+    runtime:sleep(0.5);
+
+    decimal startedAt = time:monotonicNow();
+    Error? closed = consumer->close();
+    Message|Error? result = wait pending;
+    decimal elapsed = time:monotonicNow() - startedAt;
+    test:assertTrue(closed is (), "close should succeed");
+    if result !is Error {
+        test:assertFail("close should make a waiting receive return an Error");
+    }
+    test:assertEquals(result.message(), "Consumer is closed");
+    test:assertTrue(elapsed < 10d, string `receive returned ${elapsed} s after close`);
+}
+
+@test:Config {groups: ["consumer", "concurrency"]}
+function testCancelledReceiveRequeuesTheMessage() returns error? {
+    MessageConsumer consumer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+        subscriptionConfig: {queueName: CONSUMER_CANCEL_QUEUE, ackMode: CLIENT_ACK}
+    });
+    future<Message|Error?> pending = start receiveOnNonIsolatedStrand(consumer, 30);
+    runtime:sleep(0.5);
+    pending.cancel();
+    // The cancellation is raised once the waiting receive takes this message, which must then go back to the queue.
+    check publish({queueName: CONSUMER_CANCEL_QUEUE}, "cancelled-receive-payload", PERSISTENT);
+    runtime:sleep(1);
+
+    StringPayloadMessage? redelivered = check consumer->receive(5);
+    if redelivered is StringPayloadMessage {
+        check consumer->ack(redelivered);
+    }
+    check consumer->close();
+    if redelivered is () {
+        test:assertFail("A message taken by a cancelled receive should be redelivered on the same consumer");
+    }
+    test:assertEquals(redelivered.payload, "cancelled-receive-payload");
+    test:assertEquals(redelivered.redelivered, true,
+            "The message should come back as a redelivery, not as its first delivery");
+}
+
+@test:Config {groups: ["consumer", "transacted", "concurrency"]}
+function testTransactedReceiveKeepsItsTimeoutWhileAnotherWaits() returns error? {
+    MessageConsumer consumer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        transacted: true,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+        subscriptionConfig: {queueName: CONSUMER_TX_CONCURRENCY_QUEUE}
+    });
+    future<Message|Error?> waiting = start receiveOnNonIsolatedStrand(consumer, 6);
+    runtime:sleep(0.5);
+
+    decimal startedAt = time:monotonicNow();
+    Message? noWait = check consumer->receiveNoWait();
+    decimal noWaitElapsed = time:monotonicNow() - startedAt;
+    startedAt = time:monotonicNow();
+    Message? timed = check consumer->receive(1);
+    decimal timedElapsed = time:monotonicNow() - startedAt;
+
+    Message|Error? waited = wait waiting;
+    check consumer->close();
+    test:assertTrue(noWait is () && timed is () && waited is (), "The queue is empty");
+    test:assertTrue(noWaitElapsed < 1d, string `receiveNoWait waited ${noWaitElapsed} s for the other receive`);
+    test:assertTrue(timedElapsed < 3d, string `receive(1) took ${timedElapsed} s while another receive waited`);
+}
+
+@test:Config {groups: ["consumer", "transacted", "concurrency"]}
+function testTransactedCommitDoesNotWaitForAnOpenEndedReceive() returns error? {
+    MessageConsumer consumer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        transacted: true,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+        subscriptionConfig: {queueName: CONSUMER_TX_CONCURRENCY_QUEUE}
+    });
+    // Longer than the commit threshold, so a commit that waits for the whole receive fails instead of hanging.
+    future<Message|Error?> waiting = start receiveOnNonIsolatedStrand(consumer, 10);
+    runtime:sleep(0.5);
+
+    decimal startedAt = time:monotonicNow();
+    check consumer->'commit();
+    decimal elapsed = time:monotonicNow() - startedAt;
+    check consumer->close();
+    Message|Error? waited = wait waiting;
+    test:assertTrue(elapsed < 2d, string `commit waited ${elapsed} s for the pending receive`);
+    test:assertTrue(waited is Error, "close should end the waiting receive");
+}
+
+@test:Config {groups: ["consumer", "validation", "negative"]}
+function testReceiveRejectsNegativeTimeout() returns error? {
+    MessageConsumer consumer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+        subscriptionConfig: {queueName: CONSUMER_TX_CONCURRENCY_QUEUE}
+    });
+    Message|Error? result = consumer->receive(-1);
+    check consumer->close();
+    if result !is Error {
+        test:assertFail("A negative timeout should be rejected");
+    }
+    test:assertEquals(result.message(), "Timeout must not be negative");
+}
+

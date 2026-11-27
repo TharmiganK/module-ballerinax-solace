@@ -740,3 +740,76 @@ isolated function testProducerSendAwaitAcknowledgementWithTransactedProducer() r
                 "use commit() to confirm the published messages");
     }
 }
+
+// ========================================
+// Concurrent use of one producer from non-isolated strands, which now yield while a send or commit waits
+// ========================================
+const int CONCURRENT_SENDERS = 20;
+
+int nonIsolatedSendCalls = 0;
+
+function sendOnNonIsolatedStrand(MessageProducer producer, string queueName, string payload, boolean commitEach)
+        returns error? {
+    nonIsolatedSendCalls += 1;
+    check producer->send({payload, deliveryMode: PERSISTENT}, {queueName});
+    if commitEach {
+        check producer->'commit();
+    }
+}
+
+function receivePayloads(string queueName, int expected) returns string[]|error {
+    MessageConsumer consumer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+        subscriptionConfig: {queueName}
+    });
+    string[] payloads = [];
+    while payloads.length() < expected {
+        StringPayloadMessage? message = check consumer->receive(5);
+        if message is () {
+            break;
+        }
+        payloads.push(message.payload);
+    }
+    check consumer->close();
+    return payloads.sort();
+}
+
+function sendConcurrently(MessageProducer producer, string queueName, boolean commitEach) returns string[]|error {
+    future<error?>[] sends = [];
+    string[] expected = [];
+    foreach int i in 0 ..< CONCURRENT_SENDERS {
+        string payload = string `concurrent-${i}`;
+        expected.push(payload);
+        future<error?> send = start sendOnNonIsolatedStrand(producer, queueName, payload, commitEach);
+        sends.push(send);
+    }
+    foreach future<error?> send in sends {
+        check wait send;
+    }
+    return expected.sort();
+}
+
+@test:Config {groups: ["producer", "concurrency"]}
+function testConcurrentGuaranteedSendsKeepTheirPayloads() returns error? {
+    MessageProducer producer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD}
+    });
+    string[] expected = check sendConcurrently(producer, PRODUCER_CONCURRENCY_QUEUE, false);
+    check producer->close();
+    test:assertEquals(check receivePayloads(PRODUCER_CONCURRENCY_QUEUE, CONCURRENT_SENDERS), expected);
+}
+
+@test:Config {groups: ["producer", "transacted", "concurrency"]}
+function testConcurrentTransactedSendsAndCommits() returns error? {
+    MessageProducer producer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        transacted: true,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD}
+    });
+    string[] expected = check sendConcurrently(producer, PRODUCER_TX_CONCURRENCY_QUEUE, true);
+    check producer->close();
+    test:assertEquals(check receivePayloads(PRODUCER_TX_CONCURRENCY_QUEUE, CONCURRENT_SENDERS), expected);
+}
+

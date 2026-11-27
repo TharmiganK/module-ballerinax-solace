@@ -19,6 +19,7 @@
 package io.ballerina.lib.solace.common;
 
 import io.ballerina.lib.solace.ModuleUtils;
+import io.ballerina.runtime.api.Environment;
 import io.ballerina.runtime.api.creators.ErrorCreator;
 import io.ballerina.runtime.api.utils.StringUtils;
 import io.ballerina.runtime.api.values.BArray;
@@ -27,7 +28,10 @@ import io.ballerina.runtime.api.values.BMap;
 import io.ballerina.runtime.api.values.BString;
 
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
 import static io.ballerina.lib.solace.common.MessageFieldConstants.PAYLOAD_KEY;
 import static io.ballerina.lib.solace.common.MessageFieldConstants.REDELIVERED_KEY;
@@ -76,34 +80,122 @@ public class CommonUtils {
     }
 
     /**
-     * Executes a blocking operation on a virtual thread and waits for completion.
+     * Runs a blocking operation after yielding the calling strand, so other strands, including non-isolated ones that
+     * share its lock, keep running while it waits.
      */
-    public static Object executeBlocking(RunnableWithException task) throws Exception {
-        CompletableFuture<Object> future = new CompletableFuture<>();
-
-        Thread.startVirtualThread(() -> {
-            try {
-                task.run();
-                future.complete(null);
-            } catch (Exception e) {
-                future.complete(createError("Error during blocking operation", e));
-            }
+    public static Object executeBlocking(Environment env, RunnableWithException task) {
+        return executeBlocking(env, () -> {
+            task.run();
+            return null;
         });
-
-        return future.get();
     }
 
-    public static Object executeBlocking(CompletableWithException task) throws Exception {
-        CompletableFuture<Object> future = new CompletableFuture<>();
-        Thread.startVirtualThread(() -> {
+    public static Object executeBlocking(Environment env, CompletableWithException task) {
+        AtomicBoolean completed = new AtomicBoolean();
+        AtomicReference<Object> taskResult = new AtomicReference<>();
+        try {
+            return env.yieldAndRun(() -> {
+                Object result;
+                try {
+                    result = task.run();
+                } catch (Exception e) {
+                    result = createError("Error during blocking operation", e);
+                }
+                taskResult.set(result);
+                completed.set(true);
+                return result;
+            });
+        } catch (BError panic) {
+            // The task's own failures are returned above, so this is the runtime cancelling the strand. The runtime
+            // raises it once the task has finished, if the task started at all.
+            throw new StrandCancelledException(panic, completed.get(), taskResult.get());
+        }
+    }
+
+    /**
+     * Wraps a task so it holds the transacted session's lock while it runs, since JCSMP requires serial access to a
+     * {@code TransactedSession} and its producers and flows. A null lock, for a non-transacted session, adds nothing.
+     */
+    public static CompletableWithException serialized(ReentrantLock lock, CompletableWithException task) {
+        if (lock == null) {
+            return task;
+        }
+        return () -> {
+            lock.lock();
             try {
-                Object result = task.run();
-                future.complete(result);
-            } catch (Exception e) {
-                future.complete(createError("Error during blocking operation", e));
+                return task.run();
+            } finally {
+                lock.unlock();
             }
-        });
-        return future.get();
+        };
+    }
+
+    public static RunnableWithException serialized(ReentrantLock lock, RunnableWithException task) {
+        if (lock == null) {
+            return task;
+        }
+        return () -> {
+            lock.lock();
+            try {
+                task.run();
+            } finally {
+                lock.unlock();
+            }
+        };
+    }
+
+    /**
+     * Runs a close after yielding the strand. If the strand is cancelled before the close runs, it still runs, so the
+     * session is not leaked, and the cancellation is then rethrown.
+     */
+    public static BError yieldToClose(Environment env, Supplier<BError> close) {
+        AtomicBoolean ran = new AtomicBoolean();
+        try {
+            return env.yieldAndRun(() -> {
+                ran.set(true);
+                return close.get();
+            });
+        } catch (BError panic) {
+            if (!ran.get()) {
+                // The strand still holds the lock shared by non-isolated strands here, so close off the strand.
+                Thread.ofVirtual().start(close::get);
+            }
+            throw panic;
+        }
+    }
+
+    /**
+     * Carries the runtime's panic out of a caller's generic exception handler, which must rethrow it.
+     */
+    public static final class StrandCancelledException extends RuntimeException {
+        private final BError panic;
+        private final boolean taskCompleted;
+        private final transient Object taskResult;
+
+        StrandCancelledException(BError panic, boolean taskCompleted, Object taskResult) {
+            super(panic);
+            this.panic = panic;
+            this.taskCompleted = taskCompleted;
+            this.taskResult = taskResult;
+        }
+
+        public BError panic() {
+            return panic;
+        }
+
+        /**
+         * Whether the blocking task ran to completion before the cancellation was raised.
+         */
+        public boolean taskCompleted() {
+            return taskCompleted;
+        }
+
+        /**
+         * The blocking task's result, such as a message it received, or null if it did not complete.
+         */
+        public Object taskResult() {
+            return taskResult;
+        }
     }
 
     /**

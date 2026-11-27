@@ -80,6 +80,8 @@ const string PRODUCER_CONFIRMATION_SHUTDOWN_QUEUE = "test/producer/confirmation/
 const string PRODUCER_TX_COMMIT_QUEUE = "test/producer/tx/commit/queue";
 const string PRODUCER_TX_ROLLBACK_QUEUE = "test/producer/tx/rollback/queue";
 const string PRODUCER_TX_MULTIPLE_QUEUE = "test/producer/tx/multiple/queue";
+const string PRODUCER_CONCURRENCY_QUEUE = "test/producer/concurrency/queue";
+const string PRODUCER_TX_CONCURRENCY_QUEUE = "test/producer/tx/concurrency/queue";
 
 // Producer test topics
 const string PRODUCER_TOPIC = "test/producer/topic";
@@ -93,6 +95,10 @@ const string CONSUMER_METADATA_QUEUE = "test/consumer/metadata/queue";
 const string CONSUMER_EXPIRATION_QUEUE = "test/consumer/expiration/queue";
 const string CONSUMER_TIMEOUT_QUEUE = "test/consumer/timeout/queue";
 const string CONSUMER_NOWAIT_QUEUE = "test/consumer/nowait/queue";
+const string CONSUMER_CONCURRENCY_QUEUE = "test/consumer/concurrency/queue";
+const string CONSUMER_CONCURRENCY_TOPIC = "test/consumer/concurrency/topic";
+const string CONSUMER_CANCEL_QUEUE = "test/consumer/cancel/queue";
+const string CONSUMER_TX_CONCURRENCY_QUEUE = "test/consumer/tx/concurrency/queue";
 const string CONSUMER_SELECTOR_QUEUE = "test/consumer/selector/queue";
 const string CONSUMER_MULTIPLE_QUEUE = "test/consumer/multiple/queue";
 const string CONSUMER_FLOW_QUEUE = "test/consumer/flow/queue";

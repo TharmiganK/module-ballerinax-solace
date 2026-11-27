@@ -23,14 +23,17 @@ import com.solacesystems.jcsmp.transaction.TransactedSession;
 import io.ballerina.lib.solace.common.CommonUtils;
 import io.ballerina.lib.solace.consumer.MessageConverter;
 import io.ballerina.lib.solace.observability.SolaceMetricsUtil;
+import io.ballerina.runtime.api.Environment;
 import io.ballerina.runtime.api.values.BError;
 import io.ballerina.runtime.api.values.BMap;
 import io.ballerina.runtime.api.values.BObject;
 import io.ballerina.runtime.api.values.BString;
 
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
 
 import static io.ballerina.lib.solace.common.Constants.NATIVE_AUTO_ACK;
+import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_LOCK;
 import static io.ballerina.lib.solace.common.Constants.NATIVE_TX_SESSION;
 import static io.ballerina.lib.solace.observability.SolaceMetricsUtil.reportConsumerFailure;
 import static io.ballerina.lib.solace.observability.SolaceObservabilityConstants.ERROR_TYPE_ACKNOWLEDGE;
@@ -68,11 +71,12 @@ public class CallerActions {
     /**
      * Acknowledge a message (CLIENT_ACK mode).
      *
+     * @param env     the Ballerina environment, used to yield the strand while waiting
      * @param caller  the Ballerina caller object
      * @param message the Ballerina message to acknowledge
      * @return null on success, BError on failure
      */
-    public static BError ack(BObject caller, BMap<BString, Object> message) {
+    public static BError ack(Environment env, BObject caller, BMap<BString, Object> message) {
         if (isTransacted(caller)) {
             LOGGER.warning(String.format(TRANSACTED_SETTLE_WARNING, "ack()"));
             return null;
@@ -87,13 +91,15 @@ public class CallerActions {
                 return reportConsumerFailure(caller, ERROR_TYPE_ACKNOWLEDGE,
                         "Cannot acknowledge: native message not found");
             }
-            Object result = CommonUtils.executeBlocking(nativeMessage::ackMessage);
+            Object result = CommonUtils.executeBlocking(env, nativeMessage::ackMessage);
             if (result instanceof BError bError) {
                 SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_ACKNOWLEDGE);
                 return bError;
             }
             SolaceMetricsUtil.reportAck(caller);
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_ACKNOWLEDGE);
             return CommonUtils.createError("Failed to acknowledge message", e);
@@ -103,12 +109,13 @@ public class CallerActions {
     /**
      * Negatively acknowledge a message (NACK).
      *
+     * @param env     the Ballerina environment, used to yield the strand while waiting
      * @param caller  the Ballerina caller object
      * @param message the Ballerina message to NACK
      * @param requeue if true, use FAILED outcome (requeue); if false, use REJECTED outcome (DMQ)
      * @return null on success, BError on failure
      */
-    public static BError nack(BObject caller, BMap<BString, Object> message, boolean requeue) {
+    public static BError nack(Environment env, BObject caller, BMap<BString, Object> message, boolean requeue) {
         if (isTransacted(caller)) {
             return reportConsumerFailure(caller, ERROR_TYPE_NACK, TRANSACTED_NACK_ERROR);
         }
@@ -121,7 +128,7 @@ public class CallerActions {
             if (nativeMessage == null) {
                 return reportConsumerFailure(caller, ERROR_TYPE_NACK, "Cannot NACK: native message not found");
             }
-            Object result = CommonUtils.executeBlocking(() -> {
+            Object result = CommonUtils.executeBlocking(env, () -> {
                 XMLMessage.Outcome outcome = requeue ? XMLMessage.Outcome.FAILED : XMLMessage.Outcome.REJECTED;
                 nativeMessage.settle(outcome);
                 return null;
@@ -132,6 +139,8 @@ public class CallerActions {
             }
             SolaceMetricsUtil.reportNack(caller, requeue);
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_NACK);
             return CommonUtils.createError("Failed to NACK message", e);
@@ -141,10 +150,11 @@ public class CallerActions {
     /**
      * Commit the current transaction. Only valid when the listener connection is transacted.
      *
+     * @param env    the Ballerina environment, used to yield the strand while waiting
      * @param caller the Ballerina caller object
      * @return null on success, BError on failure
      */
-    public static BError commit(BObject caller) {
+    public static BError commit(Environment env, BObject caller) {
         TransactedSession txSession = (TransactedSession) caller.getNativeData(NATIVE_TX_SESSION);
         if (txSession == null) {
             return reportConsumerFailure(caller, ERROR_TYPE_COMMIT,
@@ -152,12 +162,15 @@ public class CallerActions {
                             + "Set transacted = true on the listener configuration to enable transactions.");
         }
         try {
-            Object result = CommonUtils.executeBlocking(txSession::commit);
+            ReentrantLock txLock = (ReentrantLock) caller.getNativeData(NATIVE_TX_LOCK);
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, txSession::commit));
             if (result instanceof BError bError) {
                 SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_COMMIT);
                 return bError;
             }
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_COMMIT);
             return CommonUtils.createError("Failed to commit transaction", e);
@@ -167,10 +180,11 @@ public class CallerActions {
     /**
      * Rollback the current transaction. Only valid when the listener connection is transacted.
      *
+     * @param env    the Ballerina environment, used to yield the strand while waiting
      * @param caller the Ballerina caller object
      * @return null on success, BError on failure
      */
-    public static BError rollback(BObject caller) {
+    public static BError rollback(Environment env, BObject caller) {
         TransactedSession txSession = (TransactedSession) caller.getNativeData(NATIVE_TX_SESSION);
         if (txSession == null) {
             return reportConsumerFailure(caller, ERROR_TYPE_ROLLBACK,
@@ -178,12 +192,15 @@ public class CallerActions {
                             + "Set transacted = true on the listener configuration to enable transactions.");
         }
         try {
-            Object result = CommonUtils.executeBlocking(txSession::rollback);
+            ReentrantLock txLock = (ReentrantLock) caller.getNativeData(NATIVE_TX_LOCK);
+            Object result = CommonUtils.executeBlocking(env, CommonUtils.serialized(txLock, txSession::rollback));
             if (result instanceof BError bError) {
                 SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_ROLLBACK);
                 return bError;
             }
             return null;
+        } catch (CommonUtils.StrandCancelledException e) {
+            throw e.panic();
         } catch (Exception e) {
             SolaceMetricsUtil.reportConsumerError(caller, ERROR_TYPE_ROLLBACK);
             return CommonUtils.createError("Failed to rollback transaction", e);
