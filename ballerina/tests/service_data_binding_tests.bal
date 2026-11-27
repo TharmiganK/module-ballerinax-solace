@@ -603,6 +603,13 @@ function testServiceBindMismatchClientAckRejects() returns error? {
 
 // ----- CLIENT_ACK: a message that cannot be bound, queued when the listener stops, is left for redelivery -----
 final BindingRecorder clientAckStoppingRecorder = new;
+isolated boolean clientAckStoppingReleased = false;
+
+isolated function isClientAckStoppingReleased() returns boolean {
+    lock {
+        return clientAckStoppingReleased;
+    }
+}
 
 Service clientAckStoppingService = @ServiceConfig {
     queueName: BINDING_SVC_CLIENT_ACK_STOPPING_QUEUE,
@@ -610,7 +617,11 @@ Service clientAckStoppingService = @ServiceConfig {
 } service object {
     remote function onMessage(record {|*Message; int payload;|} message, Caller caller) returns error? {
         clientAckStoppingRecorder.addPayload(message.payload);
-        runtime:sleep(3);
+        int step = 0;
+        while step < POLL_MAX_STEPS && !isClientAckStoppingReleased() {
+            runtime:sleep(POLL_STEP);
+            step += 1;
+        }
         check caller->ack(message);
     }
     remote function onError(Error err) returns error? {
@@ -620,6 +631,9 @@ Service clientAckStoppingService = @ServiceConfig {
 
 @test:Config {groups: ["listener", "databinding", "negative"]}
 function testServiceBindMismatchQueuedAtStopIsNotRejected() returns error? {
+    lock {
+        clientAckStoppingReleased = false;
+    }
     Listener solaceListener = check new (BROKER_URL, {...connectionConfig()});
     check solaceListener.attach(clientAckStoppingService);
     check solaceListener.'start();
@@ -635,8 +649,14 @@ function testServiceBindMismatchQueuedAtStopIsNotRejected() returns error? {
     check producer->send({payload: "not-an-int"}, {queueName: BINDING_SVC_CLIENT_ACK_STOPPING_QUEUE});
     check producer->close();
     // Let the unbindable message reach the listener and queue behind the in-flight onMessage.
-    runtime:sleep(1);
-    check solaceListener.gracefulStop();
+    runtime:sleep(2);
+    future<error?> stopping = start solaceListener.gracefulStop();
+    // gracefulStop marks the listener as stopping within a broker round trip, well before onMessage is released.
+    runtime:sleep(3);
+    lock {
+        clientAckStoppingReleased = true;
+    }
+    check wait stopping;
 
     MessageConsumer consumer = check new (BROKER_URL, {
         messageVpn: MESSAGE_VPN,
