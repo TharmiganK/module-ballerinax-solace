@@ -486,9 +486,7 @@ function testServiceBindWithCaller() returns error? {
 }
 
 // ========================================
-// Negative cases: each keeps its own dedicated queue (NOT shared with anything else), so a message
-// that fails binding cannot leak into an unrelated later test. In AUTO_ACK mode such a message is
-// rejected, not redelivered.
+// Negative cases: each uses its own queue, so a message that fails binding cannot leak into a later test.
 // ========================================
 
 // ----- int sent (-> BytesMessage), string expected -----
@@ -563,6 +561,120 @@ function testServiceBindMismatchStringSentIntExpected() returns error? {
     test:assertEquals(mismatchIntRecorder.errorCount(), 1, "onError should have been invoked once");
     test:assertEquals(mismatchIntRecorder.lastError(),
             "Data binding failed: Cannot bind TextMessage to type 'int'. Expected 'string' or 'xml'");
+}
+
+// ----- CLIENT_ACK: a message that cannot be bound is rejected, not left unsettled -----
+final BindingRecorder clientAckMismatchRecorder = new;
+
+Service clientAckMismatchService = @ServiceConfig {
+    queueName: BINDING_SVC_CLIENT_ACK_MISMATCH_QUEUE,
+    ackMode: CLIENT_ACK
+} service object {
+    remote function onMessage(record {|*Message; int payload;|} message, Caller caller) returns error? {
+        clientAckMismatchRecorder.addPayload(message.payload);
+        check caller->ack(message);
+    }
+    remote function onError(Error err) returns error? {
+        clientAckMismatchRecorder.addError(err.message());
+    }
+};
+
+@test:Config {groups: ["listener", "databinding", "negative"]}
+function testServiceBindMismatchClientAckRejects() returns error? {
+    Listener solaceListener = check new (BROKER_URL, {...connectionConfig()});
+    check solaceListener.attach(clientAckMismatchService);
+    check solaceListener.'start();
+
+    MessageProducer producer = check new (BROKER_URL, {...connectionConfig()});
+    check producer->send({payload: "not-an-int"}, {queueName: BINDING_SVC_CLIENT_ACK_MISMATCH_QUEUE});
+    check producer->close();
+
+    waitForBindingError(clientAckMismatchRecorder);
+    // Leave time for a redelivery to show up as a second error if the message was not rejected.
+    runtime:sleep(2);
+    check solaceListener.gracefulStop();
+    // An unsettled message goes back to the queue when the listener's flow closes.
+    boolean queueEmpty = check queueIsEmpty(BINDING_SVC_CLIENT_ACK_MISMATCH_QUEUE);
+
+    test:assertTrue(queueEmpty, "CLIENT_ACK should reject a message that cannot be bound");
+    test:assertEquals(clientAckMismatchRecorder.errorCount(), 1, "onError should have been invoked once");
+    test:assertEquals(clientAckMismatchRecorder.payloadCount(), 0, "onMessage should not have been invoked");
+}
+
+// ----- CLIENT_ACK: a message that cannot be bound, queued when the listener stops, is left for redelivery -----
+final BindingRecorder clientAckStoppingRecorder = new;
+isolated boolean clientAckStoppingReleased = false;
+
+isolated function isClientAckStoppingReleased() returns boolean {
+    lock {
+        return clientAckStoppingReleased;
+    }
+}
+
+Service clientAckStoppingService = @ServiceConfig {
+    queueName: BINDING_SVC_CLIENT_ACK_STOPPING_QUEUE,
+    ackMode: CLIENT_ACK
+} service object {
+    remote function onMessage(record {|*Message; int payload;|} message, Caller caller) returns error? {
+        clientAckStoppingRecorder.addPayload(message.payload);
+        int step = 0;
+        while step < POLL_MAX_STEPS && !isClientAckStoppingReleased() {
+            runtime:sleep(POLL_STEP);
+            step += 1;
+        }
+        check caller->ack(message);
+    }
+    remote function onError(Error err) returns error? {
+        clientAckStoppingRecorder.addError(err.message());
+    }
+};
+
+@test:Config {groups: ["listener", "databinding", "negative"]}
+function testServiceBindMismatchQueuedAtStopIsNotRejected() returns error? {
+    lock {
+        clientAckStoppingReleased = false;
+    }
+    Listener solaceListener = check new (BROKER_URL, {...connectionConfig()});
+    check solaceListener.attach(clientAckStoppingService);
+    check solaceListener.'start();
+
+    MessageProducer producer = check new (BROKER_URL, {...connectionConfig()});
+    check producer->send({payload: 42}, {queueName: BINDING_SVC_CLIENT_ACK_STOPPING_QUEUE});
+    int step = 0;
+    while step < POLL_MAX_STEPS && clientAckStoppingRecorder.payloadCount() < 1 {
+        runtime:sleep(POLL_STEP);
+        step += 1;
+    }
+    test:assertEquals(clientAckStoppingRecorder.payloadCount(), 1, "onMessage should have started");
+    check producer->send({payload: "not-an-int"}, {queueName: BINDING_SVC_CLIENT_ACK_STOPPING_QUEUE});
+    check producer->close();
+    // Let the unbindable message reach the listener and queue behind the in-flight onMessage.
+    runtime:sleep(2);
+    future<error?> stopping = start solaceListener.gracefulStop();
+    // gracefulStop marks the listener as stopping within a broker round trip, well before onMessage is released.
+    runtime:sleep(3);
+    lock {
+        clientAckStoppingReleased = true;
+    }
+    check wait stopping;
+
+    MessageConsumer consumer = check new (BROKER_URL, {
+        messageVpn: MESSAGE_VPN,
+        auth: {username: BROKER_USERNAME, password: BROKER_PASSWORD},
+        subscriptionConfig: {queueName: BINDING_SVC_CLIENT_ACK_STOPPING_QUEUE, ackMode: CLIENT_ACK}
+    });
+    Message? leftover = check consumer->receive(5);
+    if leftover is Message {
+        check consumer->ack(leftover);
+    }
+    check consumer->close();
+
+    test:assertEquals(clientAckStoppingRecorder.errorCount(), 0,
+            "A message queued when the listener stops should not be handled");
+    test:assertTrue(leftover is Message, "A message queued when the listener stops should be left for redelivery");
+    if leftover is Message {
+        test:assertEquals(leftover.payload, "not-an-int");
+    }
 }
 
 // ----- incompatible record shape -----

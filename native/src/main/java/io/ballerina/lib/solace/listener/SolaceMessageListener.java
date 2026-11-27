@@ -77,12 +77,12 @@ final class SolaceMessageListener implements XMLMessageListener {
     private final String destination;
     private final String destinationKind;
     private final ExecutorService dispatcher;
-    private final boolean queuedRedelivered;
+    private final boolean nonTransactedFlow;
     private volatile boolean stopping;
     private volatile boolean skipQueued;
 
     SolaceMessageListener(Runtime runtime, Service nativeService, BObject caller, boolean autoAck,
-                          boolean queuedRedelivered, String url, String vpn, String destination,
+                          boolean nonTransactedFlow, String url, String vpn, String destination,
                           String destinationKind) {
         this.runtime = runtime;
         this.nativeService = nativeService;
@@ -92,7 +92,7 @@ final class SolaceMessageListener implements XMLMessageListener {
         this.vpn = vpn;
         this.destination = destination;
         this.destinationKind = destinationKind;
-        this.queuedRedelivered = queuedRedelivered;
+        this.nonTransactedFlow = nonTransactedFlow;
         this.dispatcher = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "solace-listener-dispatch");
             thread.setDaemon(true);
@@ -110,7 +110,7 @@ final class SolaceMessageListener implements XMLMessageListener {
                     ValueCreator.createTypedescValue(nativeService.getMessagePayloadType()));
         } catch (BallerinaSolaceDatabindingException e) {
             // The message could not be bound to the service's declared type - a receive-side failure.
-            submit(() -> {
+            submitUnlessSkipped(() -> {
                 dispatchError(CommonUtils.createError(e.getMessage()), null, ERROR_TYPE_RECEIVE);
                 settleUndelivered(message, XMLMessage.Outcome.REJECTED);
             });
@@ -118,7 +118,7 @@ final class SolaceMessageListener implements XMLMessageListener {
         } catch (Throwable t) {
             // The broker delivered a message the connector could not decode - a receive-side failure. Converting the
             // same message fails the same way, so only a JVM Error (such as running out of memory) is requeued.
-            submit(() -> {
+            submitUnlessSkipped(() -> {
                 dispatchError(CommonUtils.createError("Failed to convert message",
                         t instanceof Exception e ? e : new Exception(t)), null, ERROR_TYPE_RECEIVE);
                 settleUndelivered(message, t instanceof Exception ? XMLMessage.Outcome.REJECTED
@@ -129,12 +129,7 @@ final class SolaceMessageListener implements XMLMessageListener {
         SolaceMetricsUtil.reportConsume(url, vpn, destination, destinationKind,
                 CommonUtils.getPayloadSize(ballerinaMessage), CommonUtils.isRedelivered(ballerinaMessage));
         Map<String, String> traceContext = SolaceTracingUtil.extractTraceContextHeaders(ballerinaMessage);
-        submit(() -> {
-            // A message queued behind the in-flight one when the service stops is left for the broker to redeliver.
-            if (!(stopping && skipQueued)) {
-                deliver(message, ballerinaMessage, traceContext);
-            }
-        });
+        submitUnlessSkipped(() -> deliver(message, ballerinaMessage, traceContext));
     }
 
     private void deliver(BytesXMLMessage message, BMap<BString, Object> ballerinaMessage,
@@ -155,7 +150,7 @@ final class SolaceMessageListener implements XMLMessageListener {
                     t instanceof Exception e ? e : new Exception(t)), traceContext, ERROR_TYPE_DISPATCH);
         } finally {
             if (autoAck) {
-                settleAutoAck(message, processed ? XMLMessage.Outcome.ACCEPTED : XMLMessage.Outcome.FAILED,
+                settle(message, processed ? XMLMessage.Outcome.ACCEPTED : XMLMessage.Outcome.FAILED,
                         traceContext);
             }
             SolaceMetricsUtil.reportProcessDuration(url, vpn, destination, destinationKind,
@@ -164,23 +159,22 @@ final class SolaceMessageListener implements XMLMessageListener {
     }
 
     /**
-     * Settles an AUTO_ACK message that never reached {@code onMessage}: REJECTED when converting it fails the same way
-     * every time, FAILED when a JVM error that may be transient stopped the conversion.
+     * Settles a message that never reached {@code onMessage} on a non-transacted guaranteed flow, in either ack mode:
+     * REJECTED when converting it fails the same way every time, FAILED when a possibly transient JVM error stopped it.
      */
     private void settleUndelivered(BytesXMLMessage message, XMLMessage.Outcome outcome) {
-        if (autoAck) {
+        if (nonTransactedFlow) {
             SolaceMetricsUtil.reportConsume(url, vpn, destination, destinationKind,
                     message.getContentLength() + message.getAttachmentContentLength(), message.getRedelivered());
-            settleAutoAck(message, outcome, null);
+            settle(message, outcome, null);
         }
     }
 
     /**
-     * Settles an AUTO_ACK message and counts it like {@code caller->ack()}/{@code nack()}. A failure is reported as
-     * an ack or nack error, matching the outcome, since it is the broker's rather than the service's.
+     * Settles a message on behalf of the service and counts it like {@code caller->ack()}/{@code nack()}. A failure
+     * is reported as an ack or nack error, matching the outcome, since it is the broker's rather than the service's.
      */
-    private void settleAutoAck(BytesXMLMessage message, XMLMessage.Outcome outcome,
-                               Map<String, String> traceContext) {
+    private void settle(BytesXMLMessage message, XMLMessage.Outcome outcome, Map<String, String> traceContext) {
         try {
             if (outcome == XMLMessage.Outcome.ACCEPTED) {
                 message.ackMessage();
@@ -246,6 +240,18 @@ final class SolaceMessageListener implements XMLMessageListener {
         return properties;
     }
 
+    /**
+     * Submits the handling of a received message, which is skipped if it is still queued when the service stops, so
+     * the broker redelivers the message instead of the stopping listener handling it.
+     */
+    private void submitUnlessSkipped(Runnable task) {
+        submit(() -> {
+            if (!(stopping && skipQueued)) {
+                task.run();
+            }
+        });
+    }
+
     private void submit(Runnable task) {
         try {
             dispatcher.execute(task);
@@ -259,7 +265,7 @@ final class SolaceMessageListener implements XMLMessageListener {
      * the broker would not redeliver them (direct topic, transacted session), for the queued messages too.
      */
     void shutdown(boolean graceful) {
-        skipQueued = !graceful || queuedRedelivered;
+        skipQueued = !graceful || nonTransactedFlow;
         stopping = true;
         dispatcher.shutdown();
         if (!graceful) {
